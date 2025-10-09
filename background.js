@@ -9,6 +9,8 @@ let settings = {
   sharePinnedTabs: false // false = separate pinned tabs per workspace, true = shared across all
 };
 let isSwitchingWorkspace = false; // Flag to prevent window removal from updating workspace data
+let recentlyClosedWindows = new Map(); // Track windows closed during workspace switch (windowId -> timestamp)
+const RECENTLY_CLOSED_TIMEOUT = 10000; // Keep track for 10 seconds
 
 // Helper function to check if a URL is a blank/new tab page
 function isBlankTab(url) {
@@ -75,6 +77,29 @@ initializeData().then(() => {
 
 // Listen for new windows being created
 chrome.windows.onCreated.addListener(async (window) => {
+  // Check if this might be a window restored via Cmd+Shift+T
+  // We detect this by checking if a window with tabs appears immediately after we closed windows
+  // Wait a bit for the window to be fully created with tabs
+  await new Promise(resolve => setTimeout(resolve, 100));
+  
+  try {
+    const tabs = await chrome.tabs.query({ windowId: window.id });
+    
+    // If this window has multiple tabs or non-blank tabs, it might be a restored window
+    const hasContent = tabs.some(tab => !isBlankTab(tab.url));
+    
+    if (hasContent && recentlyClosedWindows.size > 0) {
+      // This looks like a restored window from Cmd+Shift+T
+      // Close it immediately to prevent interference
+      console.log('Detected accidentally restored window (Cmd+Shift+T), closing:', window.id);
+      await chrome.windows.remove(window.id).catch(() => {});
+      return;
+    }
+  } catch (e) {
+    // Window might have been closed already
+    return;
+  }
+  
   // Skip if switching workspaces or no active workspace
   if (isSwitchingWorkspace || !activeWorkspaceId || !workspaces[activeWorkspaceId]) {
     return;
@@ -155,7 +180,14 @@ setInterval(async () => {
       if (belongsToOtherWorkspace) {
         console.log('Closing window from inactive workspace:', window.id);
         try {
+          // Track this window as recently closed to prevent Cmd+Shift+T restoration
+          recentlyClosedWindows.set(window.id, Date.now());
           await chrome.windows.remove(window.id);
+          
+          // Clean up after timeout
+          setTimeout(() => {
+            recentlyClosedWindows.delete(window.id);
+          }, RECENTLY_CLOSED_TIMEOUT);
         } catch (e) {
           // Window might already be closed
         }
@@ -446,12 +478,25 @@ async function switchWorkspace(workspaceId) {
     });
   }
   
-  // Close ALL current windows
+  // Close ALL current windows and track them to prevent accidental restoration
   console.log('Closing all current windows...');
   const allWindows = await chrome.windows.getAll();
+  const closingTimestamp = Date.now();
+  
   for (const window of allWindows) {
+    // Track this window as recently closed
+    recentlyClosedWindows.set(window.id, closingTimestamp);
     await chrome.windows.remove(window.id).catch(() => {});
   }
+  
+  // Clean up old entries from recentlyClosedWindows after timeout
+  setTimeout(() => {
+    for (const [windowId, timestamp] of recentlyClosedWindows.entries()) {
+      if (timestamp === closingTimestamp) {
+        recentlyClosedWindows.delete(windowId);
+      }
+    }
+  }, RECENTLY_CLOSED_TIMEOUT);
   
   // Recreate all windows for the target workspace
   const newWindowIds = [];
