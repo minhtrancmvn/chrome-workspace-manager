@@ -729,10 +729,21 @@ async function importBackup(data) {
   // Restore workspaces (without window IDs as they're closed)
   workspaces = {};
   for (const [id, workspace] of Object.entries(data.workspaces)) {
-    workspaces[id] = {
+    const restoredWorkspace = {
       ...workspace,
       windowId: null // Reset window ID as old windows are closed
     };
+    
+    // If sharePinnedTabs is enabled, remove pinned tabs from workspace windows
+    // to prevent duplication (they'll be loaded from sharedPinnedTabs)
+    if (settings.sharePinnedTabs && restoredWorkspace.windows) {
+      restoredWorkspace.windows = restoredWorkspace.windows.map(window => ({
+        ...window,
+        tabs: window.tabs.filter(tab => !tab.pinned)
+      }));
+    }
+    
+    workspaces[id] = restoredWorkspace;
   }
   
   activeWorkspaceId = null;

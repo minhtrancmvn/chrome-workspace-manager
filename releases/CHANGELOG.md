@@ -1,5 +1,19 @@
 # Workspace Manager - Release Changelog
 
+## Version 2.3.4 - 2025-10-09
+
+### Bug Fixes
+- **Fixed duplicate pinned tabs on backup import:** When importing a backup with `sharePinnedTabs` enabled, pinned tabs were being duplicated
+- **Improved backup restoration:** Now filters out pinned tabs from workspace windows during import when shared pinned tabs mode is active
+- **Cleaner import process:** Pinned tabs are now properly loaded only from the `sharedPinnedTabs` array, not from workspace windows
+
+### Technical Details
+- Added filter during `importBackup` to remove pinned tabs from workspace windows when `settings.sharePinnedTabs` is true
+- Prevents duplicate pinned tabs by ensuring they're only loaded from one source (sharedPinnedTabs array)
+- Maintains data integrity between shared and separate pinned tab modes
+
+---
+
 ## Version 2.3.3 - 2025-10-09
 
 ### Bug Fixes
