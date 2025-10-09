@@ -1,30 +1,5 @@
 # Workspace Manager - Release Changelog
 
-## Version 2.4.0 - 2025-10-09
-
-### Breaking Changes
-- **Keyboard shortcut changed:** Extension now uses `Cmd+Shift+S` (Mac) / `Ctrl+Shift+S` (Windows/Linux)
-  - Previous shortcut (`Cmd+Shift+W`) conflicted with Chrome/Dia's "Restore closed tab/window" feature
-  - New shortcut doesn't conflict with any browser defaults
-
-### New Features
-- **Prevent accidental window restoration:** Extension now detects and blocks windows restored via `Cmd+Shift+T` (reopen closed tab/window)
-- **Smart window detection:** Automatically closes windows that were restored by browser's native restore feature
-- **10-second protection window:** Recently closed workspace windows are tracked and prevented from accidental restoration
-
-### Bug Fixes
-- **Fixed Cmd+Shift+T conflict:** Using Chrome/Dia's "Reopen closed tab/window" no longer interferes with workspace management
-- **Improved workspace isolation:** Restored windows are immediately closed to maintain workspace integrity
-
-### Technical Details
-- Added `sessions` permission for better window restoration detection
-- Implemented `recentlyClosedWindows` tracking Map with 10-second timeout
-- Enhanced `chrome.windows.onCreated` listener to detect restored windows
-- Restored windows with content are automatically closed during protection period
-- Periodic cleanup also tracks closed windows to prevent restoration
-
----
-
 ## Version 2.3.4 - 2025-10-09
 
 ### Bug Fixes

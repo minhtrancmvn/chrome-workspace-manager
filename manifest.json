@@ -1,13 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Workspace Manager",
-  "version": "2.4.0",
+  "version": "2.3.4",
   "description": "Manage different workspaces using separate windows. Switch between workspaces easily while automatically closing inactive ones to minimize memory usage.",
   "permissions": [
     "tabs",
     "windows",
-    "storage",
-    "sessions"
+    "storage"
   ],
   "background": {
     "service_worker": "background.js"
@@ -28,10 +27,9 @@
   "commands": {
     "_execute_action": {
       "suggested_key": {
-        "default": "Ctrl+Shift+S",
-        "mac": "Command+Shift+S"
-      },
-      "description": "Open Workspace Manager"
+        "default": "Ctrl+Shift+W",
+        "mac": "Command+Shift+W"
+      }
     }
   }
 }
