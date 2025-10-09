@@ -1,5 +1,28 @@
 # Workspace Manager - Release Changelog
 
+## Version 2.3.3 - 2025-10-09
+
+### Bug Fixes
+- **Fixed aggressive window cleanup:** Periodic cleanup no longer closes manually created windows
+- **Auto-track new windows:** New windows created manually are automatically added to the active workspace
+- **Improved window management:** Only closes windows from OTHER workspaces, not untracked windows
+- **Better workspace isolation:** User-created windows are now preserved and tracked automatically
+
+### New Features
+- **Automatic window detection:** When you create a new window while in a workspace, it's automatically saved to that workspace
+- **Seamless window restoration:** New windows are restored when switching back to the workspace
+
+### Documentation
+- **Added installation GIF:** Visual guide now displayed in releases/README.md for easier installation
+
+### Technical Details
+- Added `chrome.windows.onCreated` listener to track new windows
+- Modified periodic cleanup to only close windows belonging to inactive workspaces
+- Untracked windows (user-created) are now preserved until workspace switch
+- New windows automatically inherit workspace association with proper tab tracking
+
+---
+
 ## Version 2.3.2 - 2025-10-09
 
 ### UI Improvements

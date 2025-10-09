@@ -73,44 +73,86 @@ initializeData().then(() => {
   updateBadge();
 });
 
+// Listen for new windows being created
+chrome.windows.onCreated.addListener(async (window) => {
+  // Skip if switching workspaces or no active workspace
+  if (isSwitchingWorkspace || !activeWorkspaceId || !workspaces[activeWorkspaceId]) {
+    return;
+  }
+  
+  await initializeData();
+  
+  // Add this new window to the active workspace
+  const activeWorkspace = workspaces[activeWorkspaceId];
+  if (!activeWorkspace.windowIds.includes(window.id)) {
+    activeWorkspace.windowIds.push(window.id);
+    
+    // Initialize window data in the windows array
+    if (!activeWorkspace.windows) {
+      activeWorkspace.windows = [];
+    }
+    
+    // Get tabs from the new window
+    const tabs = await chrome.tabs.query({ windowId: window.id });
+    const tabData = tabs
+      .filter(tab => !isBlankTab(tab.url))
+      .map(tab => ({
+        url: tab.url,
+        title: tab.title,
+        pinned: tab.pinned
+      }));
+    
+    // If all tabs were blank, keep at least one new tab
+    if (tabData.length === 0) {
+      tabData.push({ url: 'chrome://newtab', title: 'New Tab', pinned: false });
+    }
+    
+    activeWorkspace.windows.push({
+      windowId: window.id,
+      windowState: {
+        state: 'normal'
+      },
+      tabs: tabData
+    });
+    
+    await saveState();
+    console.log('Auto-added new window to active workspace:', window.id, 'workspace:', activeWorkspaceId);
+  }
+});
+
 // Periodic cleanup: ensure only active workspace windows exist
-// Run every 30 seconds to catch any orphaned windows
+// Run every 30 seconds, but only close windows from OTHER workspaces
+// Windows that don't belong to any workspace are kept (user might be creating them)
 setInterval(async () => {
   await initializeData();
   const allWindows = await chrome.windows.getAll();
   
-  // Only cleanup if we have windows
+  // Only cleanup if we have windows and an active workspace
   if (allWindows.length > 0 && activeWorkspaceId && workspaces[activeWorkspaceId]) {
     const activeWorkspace = workspaces[activeWorkspaceId];
-    
-    // Get all window IDs that belong to ANY workspace
-    const allWorkspaceWindowIds = new Set();
-    for (const workspace of Object.values(workspaces)) {
-      if (workspace.windowIds && Array.isArray(workspace.windowIds)) {
-        workspace.windowIds.forEach(wId => allWorkspaceWindowIds.add(wId));
-      }
-    }
     
     // Set flag to prevent onRemoved from updating workspace data
     isSwitchingWorkspace = true;
     
-    // Close windows that don't belong to the active workspace
+    // Close windows that belong to OTHER workspaces (not active)
     for (const window of allWindows) {
       // If this window belongs to active workspace, keep it
       if (activeWorkspace.windowIds && activeWorkspace.windowIds.includes(window.id)) {
         continue;
       }
       
-      // If it doesn't belong to any workspace, it's orphaned - close it
-      if (!allWorkspaceWindowIds.has(window.id)) {
-        console.log('Closing orphaned window:', window.id);
-        try {
-          await chrome.windows.remove(window.id);
-        } catch (e) {
-          // Window might already be closed
+      // Check if it belongs to another workspace
+      let belongsToOtherWorkspace = false;
+      for (const [wsId, workspace] of Object.entries(workspaces)) {
+        if (wsId !== activeWorkspaceId && workspace.windowIds && workspace.windowIds.includes(window.id)) {
+          belongsToOtherWorkspace = true;
+          break;
         }
-      } else {
-        // Window belongs to another workspace (not active), close it
+      }
+      
+      // Only close if it belongs to another workspace
+      // Windows not in any workspace are kept (user created them)
+      if (belongsToOtherWorkspace) {
         console.log('Closing window from inactive workspace:', window.id);
         try {
           await chrome.windows.remove(window.id);

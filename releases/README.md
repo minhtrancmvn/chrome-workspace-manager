@@ -9,6 +9,8 @@ This folder contains all packaged releases of the Workspace Manager Chrome exten
 
 ## Installing a Release
 
+![Installation Guide](install-guide.gif)
+
 1. Download the desired `.zip` file
 2. Extract the contents to a folder
 3. Open Chrome/Dia and go to `chrome://extensions/`

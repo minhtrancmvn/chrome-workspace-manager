@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Workspace Manager",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "description": "Manage different workspaces using separate windows. Switch between workspaces easily while automatically closing inactive ones to minimize memory usage.",
   "permissions": [
     "tabs",
