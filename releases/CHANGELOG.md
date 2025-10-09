@@ -1,5 +1,18 @@
 # Workspace Manager - Release Changelog
 
+## Version 2.3.5 - 2025-10-09
+
+### Changes
+- **Keyboard shortcut changed:** Extension now uses `Cmd+Shift+S` (Mac) / `Ctrl+Shift+S` (Windows/Linux)
+  - Previous shortcut (`Cmd+Shift+W`) conflicted with Chrome/Dia's "Restore closed tab/window" feature
+  - New shortcut doesn't conflict with any browser defaults
+
+### Note
+- Version 2.4.0 was released but immediately reverted due to issues with window restoration detection
+- This version only includes the keyboard shortcut change without the experimental Cmd+Shift+T prevention feature
+
+---
+
 ## Version 2.3.4 - 2025-10-09
 
 ### Bug Fixes
