@@ -1,5 +1,24 @@
 # Workspace Manager - Release Changelog
 
+## Version 2.3.1 - 2025-10-09
+
+### UI Improvements
+- **Redesigned workspace creation layout:** More compact and cleaner design
+- Name input and color picker now on same row for better space usage
+- Checkbox moved above the Create button for better visual flow
+- Improved spacing and alignment throughout the form
+
+### Layout Changes
+```
+Before:                          After:
+[Name input...............]      [Name input........] [Color]
+Color: [picker]                  [ ] Include current tabs
+[Create Workspace]               [Create Workspace]
+[ ] Include current tabs
+```
+
+---
+
 ## Version 2.3.0 - 2025-10-09
 
 ### New Features
