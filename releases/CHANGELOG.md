@@ -1,5 +1,20 @@
 # Workspace Manager - Release Changelog
 
+## Version 2.3.7 - 2025-10-09
+
+### Bug Fixes
+- **Fixed startup window cleanup:** Now properly uses `windowIds` array instead of singular `windowId`
+- **Improved multi-window handling:** Startup cleanup now iterates through all workspace windows to find valid ones
+- **Better window restoration:** `restoreActiveWindowState` now correctly manages the `windowIds` array
+- **Data structure consistency:** All functions now use the modern multi-window data format
+
+### Technical Details
+- Updated `cleanupMultipleWindows` to iterate through `workspace.windowIds` array
+- Updated `restoreActiveWindowState` to properly set and check `windowIds` as an array
+- Ensures compatibility with multi-window workspace support introduced in v2.3.3
+
+---
+
 ## Version 2.3.5 - 2025-10-09
 
 ### Changes

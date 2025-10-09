@@ -1060,7 +1060,7 @@ async function restoreActiveWindowState(window) {
         (b[1].lastAccessed || 0) - (a[1].lastAccessed || 0)
       );
       const [id, workspace] = sortedWorkspaces[0];
-      workspace.windowId = window.id;
+      workspace.windowIds = [window.id];
       activeWorkspaceId = id;
     } else {
       return;
@@ -1069,8 +1069,13 @@ async function restoreActiveWindowState(window) {
   
   const workspace = workspaces[activeWorkspaceId];
   
-  // Always update window ID to ensure association
-  workspace.windowId = window.id;
+  // Always update window IDs to ensure association
+  if (!workspace.windowIds) {
+    workspace.windowIds = [];
+  }
+  if (!workspace.windowIds.includes(window.id)) {
+    workspace.windowIds = [window.id];
+  }
   
   // Update tabs from current window (browser may have restored them)
   try {
@@ -1136,12 +1141,18 @@ async function cleanupMultipleWindows() {
     let activeWindow = null;
     if (activeWorkspaceId && workspaces[activeWorkspaceId]) {
       const workspace = workspaces[activeWorkspaceId];
-      try {
-        activeWindow = await chrome.windows.get(workspace.windowId);
-        // Restore the window state if found
-        await restoreActiveWindowState(activeWindow);
-      } catch (e) {
-        // Window doesn't exist
+      // Check if any of the workspace's windows still exist
+      if (workspace.windowIds && workspace.windowIds.length > 0) {
+        for (const windowId of workspace.windowIds) {
+          try {
+            activeWindow = await chrome.windows.get(windowId);
+            // Restore the window state if found
+            await restoreActiveWindowState(activeWindow);
+            break; // Found a valid window, stop looking
+          } catch (e) {
+            // Window doesn't exist, try next one
+          }
+        }
       }
     }
     
