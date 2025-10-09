@@ -1,5 +1,25 @@
 # Workspace Manager - Release Changelog
 
+## Version 2.3.2 - 2025-10-09
+
+### UI Improvements
+- **Two-line workspace card info display:** Better readability and visual hierarchy
+- Window and tab counts now on first line
+- Last accessed timestamp on second line
+- Improved spacing with gap between lines
+
+### Layout Changes
+```
+Before:
+1 window(s) • 2 tab(s) • Last accessed: Just now
+
+After:
+1 window(s) • 2 tab(s)
+Last accessed: Just now
+```
+
+---
+
 ## Version 2.3.1 - 2025-10-09
 
 ### UI Improvements

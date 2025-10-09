@@ -130,7 +130,8 @@ function createWorkspaceElement(workspace) {
         ${workspace.id === activeWorkspaceId ? '<span class="badge">ACTIVE</span>' : ''}
       </div>
       <div class="workspace-meta">
-        ${windowCount} window${windowCount !== 1 ? 's' : ''} • ${tabCount} tab${tabCount !== 1 ? 's' : ''} • Last accessed: ${lastAccessed}
+        <div class="meta-line">${windowCount} window${windowCount !== 1 ? 's' : ''} • ${tabCount} tab${tabCount !== 1 ? 's' : ''}</div>
+        <div class="meta-line">Last accessed: ${lastAccessed}</div>
       </div>
     </div>
     <div class="workspace-actions">
