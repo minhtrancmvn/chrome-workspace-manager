@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Workspace Manager</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Workspace Manager</h1>
+      <p class="subtitle">Manage your browsing workspaces</p>
+    </header>
+
+    <div class="create-workspace">
+      <input type="text" id="workspaceName" placeholder="New workspace name...">
+      <div class="color-picker-row">
+        <label for="workspaceColor" class="color-label">Color:</label>
+        <input type="color" id="workspaceColor" value="#667eea" title="Choose workspace color">
+      </div>
+      <button id="createBtn">Create Workspace</button>
+      <label class="checkbox-label">
+        <input type="checkbox" id="includeCurrentTabs">
+        Include current tabs
+      </label>
+    </div>
+
+    <div class="settings-section">
+      <h2>Settings</h2>
+      <label class="setting-label">
+        <input type="checkbox" id="sharePinnedTabs">
+        <span>Share pinned tabs across all workspaces</span>
+        <span class="setting-hint">When enabled, pinned tab URLs will be the same in all workspaces. Note: Chrome creates new tab instances for each window, but they'll have the same URLs.</span>
+      </label>
+    </div>
+
+    <div class="workspaces-section">
+      <h2>Your Workspaces</h2>
+      <div id="workspacesList" class="workspaces-list">
+        <!-- Workspaces will be dynamically added here -->
+      </div>
+      <div id="emptyState" class="empty-state">
+        <p>No workspaces yet. Create one to get started!</p>
+      </div>
+    </div>
+
+    <footer>
+      <div class="backup-section">
+        <button id="exportBtn" class="backup-btn" title="Export all workspaces to a file">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 2L8 10M8 10L5 7M8 10L11 7M3 12L3 13C3 13.5523 3.44772 14 4 14L12 14C12.5523 14 13 13.5523 13 13L13 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Export Backup
+        </button>
+        <button id="importBtn" class="backup-btn" title="Import workspaces from a backup file">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 10L8 2M8 2L5 5M8 2L11 5M3 12L3 13C3 13.5523 3.44772 14 4 14L12 14C12.5523 14 13 13.5523 13 13L13 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Import Backup
+        </button>
+        <input type="file" id="importFile" accept=".json" style="display: none;">
+      </div>
+      <p class="info">💡 Switching workspaces closes other windows to save memory</p>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
