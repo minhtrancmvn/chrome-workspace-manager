@@ -26,6 +26,9 @@ Temporary Items
 .vscode/
 *.code-workspace
 
+# GitHub Copilot instructions (workspace-specific)
+.github/copilot-instructions.md
+
 # Node modules (if any)
 node_modules/
 
