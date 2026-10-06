@@ -1,4 +1,12 @@
 // Background service worker for Workspace Manager
+if (typeof importScripts === 'function') importScripts('browser-api.js');
+
+function restorableUrl(url) {
+  if (typeof browser !== 'undefined' && browser.runtime?.getBrowserInfo && isBlankTab(url)) {
+    return 'about:blank';
+  }
+  return url;
+}
 
 // Store workspace data
 let workspaces = {};
@@ -8,7 +16,183 @@ let sharedPinnedTabs = [];
 let settings = {
   sharePinnedTabs: false // false = separate pinned tabs per workspace, true = shared across all
 };
-let isSwitchingWorkspace = false; // Flag to prevent window removal from updating workspace data
+let isSwitchingWorkspace = false;
+let dataReady;
+let stateQueue = Promise.resolve();
+let durableState;
+let startupState;
+let recoverySessionId;
+let recoveryJournal;
+let recoveryMetadata;
+let startupSuperseded = false;
+let discardStartupOnSave = false;
+let userMutationInProgress = false;
+let saveWorkspaceTimeout;
+
+const recoveryKey = 'workspaceRecovery';
+const sessionKey = 'workspaceSessionId';
+
+function markerUrl(operationId, slot) {
+  const url = new URL(chrome.runtime.getURL('recovery.html'));
+  url.searchParams.set('operation', operationId);
+  url.searchParams.set('slot', String(slot));
+  return url.href;
+}
+
+async function readRecoveryMetadata() {
+  const session = await chrome.storage.session.get(sessionKey);
+  recoverySessionId = session[sessionKey];
+  if (!recoverySessionId) {
+    recoverySessionId = crypto.randomUUID();
+    await chrome.storage.session.set({ [sessionKey]: recoverySessionId });
+  }
+  const local = await chrome.storage.local.get([recoveryKey, 'workspaceStartup']);
+  recoveryJournal = local[recoveryKey] || null;
+  recoveryMetadata = local.workspaceStartup || null;
+}
+
+async function writeRecoveryJournal(journal) {
+  await chrome.storage.local.set({ [recoveryKey]: journal });
+  recoveryJournal = journal;
+}
+
+async function locatePreparedWindows(journal) {
+  const windows = await chrome.windows.getAll({ populate: true });
+  return windows.filter(window => (journal.slots || []).some((slot, index) =>
+    (slot.id === window.id && slot.id !== null) ||
+    window.tabs?.some(tab => tab.url === markerUrl(journal.operationId, index))));
+}
+
+async function recoverTransition() {
+  const journal = recoveryJournal;
+  if (!journal) return;
+  const sameSession = journal.sessionId === recoverySessionId;
+  const windows = sameSession ? await locatePreparedWindows(journal) : [];
+  if (journal.phase !== 'committed') {
+    const sourceState = JSON.parse(JSON.stringify(journal.sourceState));
+    if (!sameSession) {
+      for (const workspace of Object.values(sourceState.workspaces)) workspace.windowIds = [];
+    }
+    await chrome.storage.local.set({ ...sourceState, [recoveryKey]: journal });
+    applyState(sourceState);
+    durableState = copyState();
+    for (const window of windows) {
+      try { await chrome.windows.remove(window.id); } catch (error) {
+        if (!/No window|not found/i.test(error.message)) throw error;
+      }
+    }
+  } else {
+    if (sameSession) {
+      const sourceIds = new Set(journal.sourceIds || []);
+      for (const id of sourceIds) {
+        try { await chrome.windows.remove(id); } catch (error) {
+          if (!/No window|not found/i.test(error.message)) throw error;
+        }
+      }
+      for (const workspace of Object.values(workspaces)) {
+        workspace.windowIds = workspace.windowIds.filter(id => !sourceIds.has(id));
+      }
+    } else {
+      for (const workspace of Object.values(workspaces)) workspace.windowIds = [];
+    }
+    if (journal.committedState) {
+      const committedState = JSON.parse(JSON.stringify(journal.committedState));
+      if (!sameSession) for (const workspace of Object.values(committedState.workspaces)) workspace.windowIds = [];
+      else for (const workspace of Object.values(committedState.workspaces)) {
+        workspace.windowIds = workspace.windowIds.filter(id => !(journal.sourceIds || []).includes(id));
+      }
+      const startup = { sessionId: recoverySessionId, state: committedState };
+      await chrome.storage.local.set({ ...committedState, workspaceStartup: startup });
+      recoveryMetadata = startup;
+      applyState(committedState);
+      durableState = copyState();
+    }
+  }
+  await chrome.storage.local.remove(recoveryKey);
+  recoveryJournal = null;
+}
+
+const excludedWindowIds = new Set();
+const dirtyWindowIds = new Set();
+
+function copyState() {
+  return JSON.parse(JSON.stringify({ workspaces, activeWorkspaceId, sharedPinnedTabs, settings }));
+}
+
+function applyState(state) {
+  ({ workspaces, activeWorkspaceId, sharedPinnedTabs, settings } = JSON.parse(JSON.stringify(state)));
+}
+
+// Chrome does not serialize async event listeners. Own mutations in one queue;
+// internal helpers do not enqueue again, so import/delete can call switch safely.
+function runStateOperation(operation) {
+  const result = stateQueue.then(async () => {
+    await initializeData();
+    try {
+      await recoverTransition();
+      return await operation();
+    } catch (error) {
+      if (durableState) applyState(durableState);
+      throw error;
+    }
+  });
+  stateQueue = result.catch(() => {});
+  return result;
+}
+
+function reportEventError(error) {
+  console.error('Workspace event failed:', error);
+}
+
+async function withTransition(operation) {
+  if (isSwitchingWorkspace) throw new Error('Workspace transition already in progress');
+  isSwitchingWorkspace = true;
+  clearTimeout(saveWorkspaceTimeout);
+  dirtyWindowIds.clear();
+  try {
+    return await operation();
+  } finally {
+    isSwitchingWorkspace = false;
+  }
+}
+
+function scheduleWorkspaceSave(windowId) {
+  const duringTransition = isSwitchingWorkspace;
+  // Check again in the queue: a timer/event can outlive a workspace switch.
+  return runStateOperation(async () => {
+    if (duringTransition || isSwitchingWorkspace || !activeWorkspaceId || excludedWindowIds.has(windowId)) return;
+    const workspace = workspaces[activeWorkspaceId];
+    if (!workspace) return;
+    if (!workspace.windowIds.includes(windowId) && Object.entries(workspaces)
+      .some(([id, ws]) => id !== activeWorkspaceId && ws.windowIds?.includes(windowId))) return;
+    try {
+      await chrome.windows.get(windowId);
+    } catch (error) {
+      return; // A delayed event can refer to an already closed window.
+    }
+    const workspaceId = activeWorkspaceId;
+    dirtyWindowIds.add(windowId);
+    clearTimeout(saveWorkspaceTimeout);
+    saveWorkspaceTimeout = setTimeout(() => {
+      runStateOperation(async () => {
+        if (workspaceId !== activeWorkspaceId || isSwitchingWorkspace) return;
+        let hasLiveChange = false;
+        for (const id of dirtyWindowIds) {
+          try {
+            await chrome.windows.get(id);
+            hasLiveChange = true;
+            break;
+          } catch (error) {
+            // Closed windows alone retain recovery, but must not discard a
+            // different live window's change in the same coalesced batch.
+          }
+        }
+        if (hasLiveChange) await saveAllWorkspaceWindows();
+        dirtyWindowIds.clear();
+      }).catch(reportEventError);
+    }, 500);
+  }).catch(reportEventError);
+}
 
 // Helper function to check if a URL is a blank/new tab page
 function isBlankTab(url) {
@@ -26,602 +210,306 @@ function isBlankTab(url) {
 }
 
 // Initialize storage and ensure data is loaded
-async function initializeData() {
-  if (isDataLoaded) return;
-  
-  return new Promise((resolve) => {
-    chrome.storage.local.get(['workspaces', 'activeWorkspaceId', 'sharedPinnedTabs', 'settings'], (result) => {
+function initializeData() {
+  if (!dataReady) {
+    dataReady = (async () => {
+      const result = await new Promise((resolve, reject) => {
+        chrome.storage.local.get(['workspaces', 'activeWorkspaceId', 'sharedPinnedTabs', 'settings'], value => {
+          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+          else resolve(value);
+        });
+      });
       workspaces = result.workspaces || {};
       activeWorkspaceId = result.activeWorkspaceId || null;
       sharedPinnedTabs = result.sharedPinnedTabs || [];
       settings = result.settings || { sharePinnedTabs: false };
-      
-      // Migrate old data format (single windowId) to new format (windowIds array)
       for (const workspace of Object.values(workspaces)) {
         if (workspace.windowId !== undefined && !workspace.windowIds) {
           workspace.windowIds = workspace.windowId ? [workspace.windowId] : [];
           delete workspace.windowId;
         }
-        // Ensure windowIds exists
-        if (!workspace.windowIds) {
-          workspace.windowIds = [];
-        }
+        if (!workspace.windowIds) workspace.windowIds = [];
       }
-      
       isDataLoaded = true;
-      resolve();
+      durableState = copyState();
+      await readRecoveryMetadata();
+      await recoverTransition();
+      startupState = recoveryMetadata?.sessionId === recoverySessionId && recoveryMetadata.state !== null ? recoveryMetadata.state : copyState();
+      if (recoveryJournal?.phase === 'committed' && recoveryJournal.committedState) startupState = copyState();
+      if (recoveryMetadata?.sessionId !== recoverySessionId) {
+        recoveryMetadata = { sessionId: recoverySessionId, state: copyState() };
+        await chrome.storage.local.set({ workspaceStartup: recoveryMetadata });
+      }
+      startupSuperseded = recoveryMetadata?.sessionId === recoverySessionId && recoveryMetadata.state === null;
+      if (startupSuperseded) startupState = null;
+    })().catch(error => {
+      dataReady = null;
+      throw error;
     });
-  });
+  }
+  return dataReady;
 }
 
-// Initialize on install
 chrome.runtime.onInstalled.addListener(() => {
-  initializeData();
+  return runStateOperation(() => updateBadge()).catch(reportEventError);
 });
 
-// Initialize on startup
-chrome.runtime.onStartup.addListener(async () => {
-  await initializeData();
-  updateBadge();
-  
-  // Clean up multiple windows on startup - only keep active workspace window
-  await cleanupMultipleWindows();
+chrome.runtime.onStartup.addListener(() => {
+  return runStateOperation(() => restoreWorkspaceOnStartup()).catch(reportEventError);
 });
 
-// Load data immediately when service worker starts
-initializeData().then(() => {
-  updateBadge();
-});
+// onSuspend cannot finish async Chrome work reliably. Persist during live events.
+initializeData().then(updateBadge).catch(reportEventError);
 
-// Listen for new windows being created
-chrome.windows.onCreated.addListener(async (window) => {
-  // Skip if switching workspaces or no active workspace
-  if (isSwitchingWorkspace || !activeWorkspaceId || !workspaces[activeWorkspaceId]) {
-    return;
-  }
-  
-  await initializeData();
-  
-  // Add this new window to the active workspace
-  const activeWorkspace = workspaces[activeWorkspaceId];
-  if (!activeWorkspace.windowIds.includes(window.id)) {
-    activeWorkspace.windowIds.push(window.id);
-    
-    // Initialize window data in the windows array
-    if (!activeWorkspace.windows) {
-      activeWorkspace.windows = [];
+chrome.windows.onCreated.addListener(window => {
+  const duringTransition = isSwitchingWorkspace;
+  return runStateOperation(async () => {
+    if (duringTransition || excludedWindowIds.has(window.id) || !activeWorkspaceId || !workspaces[activeWorkspaceId]) return;
+    const workspace = workspaces[activeWorkspaceId];
+    if (workspace.windowIds.includes(window.id)) return;
+    // Late events for closed/source windows must not adopt them into the target.
+    if (Object.entries(workspaces).some(([id, ws]) => id !== activeWorkspaceId && ws.windowIds?.includes(window.id))) return;
+    try {
+      await chrome.windows.get(window.id);
+    } catch (error) {
+      return; // Event can arrive after this window has already closed.
     }
-    
-    // Get tabs from the new window
-    const tabs = await chrome.tabs.query({ windowId: window.id });
-    const tabData = tabs
-      .filter(tab => !isBlankTab(tab.url))
-      .map(tab => ({
-        url: tab.url,
-        title: tab.title,
-        pinned: tab.pinned
-      }));
-    
-    // If all tabs were blank, keep at least one new tab
-    if (tabData.length === 0) {
-      tabData.push({ url: 'chrome://newtab', title: 'New Tab', pinned: false });
-    }
-    
-    activeWorkspace.windows.push({
-      windowId: window.id,
-      windowState: {
-        state: 'normal'
-      },
-      tabs: tabData
-    });
-    
-    await saveState();
-    console.log('Auto-added new window to active workspace:', window.id, 'workspace:', activeWorkspaceId);
-  }
+    await saveAllWorkspaceWindows();
+  }).catch(reportEventError);
 });
 
-// Periodic cleanup: ensure only active workspace windows exist
-// Run every 30 seconds, but only close windows from OTHER workspaces
-// Windows that don't belong to any workspace are kept (user might be creating them)
-setInterval(async () => {
-  await initializeData();
-  const allWindows = await chrome.windows.getAll();
-  
-  // Only cleanup if we have windows and an active workspace
-  if (allWindows.length > 0 && activeWorkspaceId && workspaces[activeWorkspaceId]) {
-    const activeWorkspace = workspaces[activeWorkspaceId];
-    
-    // Set flag to prevent onRemoved from updating workspace data
-    isSwitchingWorkspace = true;
-    
-    // Close windows that belong to OTHER workspaces (not active)
+setInterval(() => {
+  return runStateOperation(async () => {
+    if (!activeWorkspaceId || !workspaces[activeWorkspaceId]) return;
+    // Cleanup already owns the queue; do not cancel pending active-tab saves.
+    const allWindows = await chrome.windows.getAll();
+    const workspace = workspaces[activeWorkspaceId];
     for (const window of allWindows) {
-      // If this window belongs to active workspace, keep it
-      if (activeWorkspace.windowIds && activeWorkspace.windowIds.includes(window.id)) {
-        continue;
-      }
-      
-      // Check if it belongs to another workspace
-      let belongsToOtherWorkspace = false;
-      for (const [wsId, workspace] of Object.entries(workspaces)) {
-        if (wsId !== activeWorkspaceId && workspace.windowIds && workspace.windowIds.includes(window.id)) {
-          belongsToOtherWorkspace = true;
-          break;
-        }
-      }
-      
-      // Only close if it belongs to another workspace
-      // Windows not in any workspace are kept (user created them)
-      if (belongsToOtherWorkspace) {
-        console.log('Closing window from inactive workspace:', window.id);
-        try {
-          await chrome.windows.remove(window.id);
-        } catch (e) {
-          // Window might already be closed
-        }
-      }
+      if (workspace.windowIds.includes(window.id)) continue;
+      const inactive = Object.entries(workspaces).some(([id, ws]) =>
+        id !== activeWorkspaceId && ws.windowIds?.includes(window.id));
+      if (inactive) await chrome.windows.remove(window.id);
     }
-    
-    // Clear flag
-    isSwitchingWorkspace = false;
-  }
-}, 30000); // 30 seconds
+  }).catch(reportEventError);
+}, 30000);
 
-// Listen for messages from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  switch (request.action) {
-    case 'getWorkspaces':
-      // Ensure data is loaded before responding
-      initializeData().then(() => {
-        console.log('Sending workspaces to popup:', Object.keys(workspaces).length, 'workspaces');
-        console.log('Workspace details:', workspaces);
-        sendResponse({ workspaces, activeWorkspaceId });
-      });
-      return true; // Keep channel open for async response
-    
-    case 'createWorkspace':
-      createWorkspace(request.name, request.includeCurrentTabs, request.color)
-        .then(sendResponse)
-        .catch(error => sendResponse({ error: error.message }));
-      return true; // Keep channel open for async response
-    
-    case 'switchWorkspace':
-      switchWorkspace(request.workspaceId)
-        .then(sendResponse)
-        .catch(error => sendResponse({ error: error.message }));
-      return true;
-    
-    case 'deleteWorkspace':
-      console.log('Delete workspace request received:', request.workspaceId);
-      deleteWorkspace(request.workspaceId)
-        .then(result => {
-          console.log('Delete workspace success:', result);
-          sendResponse(result);
-        })
-        .catch(error => {
-          console.error('Delete workspace error:', error);
-          sendResponse({ error: error.message });
-        });
-      return true;
-    
-    case 'updateWorkspace':
-      updateWorkspace(request.workspaceId, request.updates)
-        .then(sendResponse)
-        .catch(error => sendResponse({ error: error.message }));
-      return true;
-    
-    case 'updateWorkspaceColor':
-      updateWorkspaceColor(request.workspaceId, request.color)
-        .then(sendResponse)
-        .catch(error => sendResponse({ error: error.message }));
-      return true;
-    
-    case 'renameWorkspace':
-      renameWorkspace(request.workspaceId, request.name)
-        .then(sendResponse)
-        .catch(error => sendResponse({ error: error.message }));
-      return true;
-    
-    case 'exportBackup':
-      exportBackup()
-        .then(sendResponse)
-        .catch(error => sendResponse({ error: error.message }));
-      return true;
-    
-    case 'importBackup':
-      importBackup(request.data)
-        .then(sendResponse)
-        .catch(error => sendResponse({ error: error.message }));
-      return true;
-    
-    case 'getSettings':
-      sendResponse({ settings, sharedPinnedTabs });
-      break;
-    
-    case 'updateSettings':
-      updateSettings(request.settings)
-        .then(sendResponse)
-        .catch(error => sendResponse({ error: error.message }));
-      return true;
-  }
+  const actions = {
+    getWorkspaces: () => ({ workspaces, activeWorkspaceId }),
+    getSettings: () => ({ settings, sharedPinnedTabs }),
+    createWorkspace: () => createWorkspace(request.name, request.includeCurrentTabs, request.color),
+    switchWorkspace: () => switchWorkspace(request.workspaceId),
+    deleteWorkspace: () => deleteWorkspace(request.workspaceId),
+    updateWorkspace: () => updateWorkspace(request.workspaceId, request.updates),
+    updateWorkspaceColor: () => updateWorkspaceColor(request.workspaceId, request.color),
+    renameWorkspace: () => renameWorkspace(request.workspaceId, request.name),
+    exportBackup: () => exportBackup(),
+    importBackup: () => importBackup(request.data),
+    updateSettings: () => updateSettings(request.settings)
+  };
+  if (!Object.prototype.hasOwnProperty.call(actions, request.action)) return;
+  runStateOperation(async () => {
+    const mutating = !['getSettings', 'getWorkspaces', 'exportBackup'].includes(request.action);
+    const atomicMutation = ['renameWorkspace', 'updateWorkspace', 'updateWorkspaceColor', 'updateSettings'].includes(request.action);
+    userMutationInProgress = mutating;
+    discardStartupOnSave = atomicMutation;
+    try {
+      const result = await actions[request.action]();
+      if (mutating) {
+        if (!atomicMutation) {
+          discardStartupOnSave = true;
+          await saveState();
+        }
+        startupState = null;
+        startupSuperseded = true;
+      }
+      return result;
+    } finally {
+      discardStartupOnSave = false;
+      userMutationInProgress = false;
+    }
+  })
+    .then(sendResponse)
+    .catch(error => sendResponse({ error: error.message }));
+  return true;
 });
+
+// Prepare every replacement tab before touching source windows. Persist target
+// ownership before removal, leaving outgoing snapshots durable if worker dies.
+async function prepareWorkspaceWindows(workspace, preparedIds, fresh = false) {
+  const windows = workspace.windows?.length ? workspace.windows : [
+    { windowState: { state: 'maximized' }, tabs: [] }
+  ];
+  const operation = recoveryJournal;
+  for (const [index, windowData] of windows.entries()) {
+    const state = windowData.windowState || { state: 'normal' };
+    const options = { focused: index === 0, state: 'normal' };
+    if (state.state === 'normal' && state.width && state.height) {
+      Object.assign(options, { left: state.left, top: state.top, width: state.width, height: state.height });
+    }
+    if (operation) options.url = markerUrl(operation.operationId, index);
+    const window = await chrome.windows.create(options);
+    preparedIds.push(window.id);
+    if (operation) {
+      operation.slots[index].id = window.id;
+      await writeRecoveryJournal(operation);
+      await chrome.tabs.update(window.tabs[0].id, { url: typeof restorableUrl === 'function' ? restorableUrl('chrome://newtab') : 'chrome://newtab' });
+    }
+    if (state.state && state.state !== 'normal') {
+      await chrome.windows.update(window.id, { state: state.state });
+    }
+    const workspaceTabs = fresh && settings.sharePinnedTabs && sharedPinnedTabs.length ? [] : windowData.tabs;
+    const tabs = settings.sharePinnedTabs ? [...sharedPinnedTabs, ...workspaceTabs] : workspaceTabs;
+    const ordered = [...tabs.filter(tab => tab.pinned), ...tabs.filter(tab => !tab.pinned)];
+    for (const tab of ordered) {
+      await chrome.tabs.create({ windowId: window.id, url: restorableUrl(tab.url), pinned: tab.pinned || false });
+    }
+    if (ordered.length && window.tabs?.[0]) await chrome.tabs.remove(window.tabs[0].id);
+  }
+}
+
+async function replaceWorkspaceWindows(workspaceId, sourceWindows, previousState, fresh = false) {
+  const preparedIds = [];
+  let committed = false;
+  const workspace = workspaceId ? workspaces[workspaceId] : { windows: [] };
+  const operationId = crypto.randomUUID();
+  const operation = { operationId, sessionId: recoverySessionId, phase: 'preparing',
+    sourceState: previousState, sourceIds: sourceWindows.map(window => window.id), targetId: workspaceId,
+    slots: (workspace.windows?.length ? workspace.windows : [{ tabs: [] }]).map((_, index) => ({ index, id: null })) };
+  await writeRecoveryJournal(operation);
+  try {
+    await prepareWorkspaceWindows(workspace, preparedIds, fresh);
+    if (workspaceId) {
+      workspace.windowIds = preparedIds;
+      workspace.lastAccessed = Date.now();
+    }
+    activeWorkspaceId = workspaceId;
+    const committedJournal = { ...operation, phase: 'committed', committedState: copyState() };
+    const startup = userMutationInProgress
+      ? { sessionId: recoverySessionId, state: null }
+      : { sessionId: recoverySessionId, state: committedJournal.committedState };
+    await chrome.storage.local.set({ ...committedJournal.committedState, [recoveryKey]: committedJournal, workspaceStartup: startup });
+    recoveryMetadata = startup;
+    startupState = startup.state;
+    recoveryJournal = committedJournal;
+    durableState = copyState();
+    updateBadge();
+    committed = true;
+    for (const window of sourceWindows) excludedWindowIds.add(window.id);
+    for (const window of sourceWindows) await chrome.windows.remove(window.id);
+    const sourceIds = new Set(sourceWindows.map(window => window.id));
+    for (const ws of Object.values(workspaces)) {
+      ws.windowIds = ws.windowIds.filter(id => !sourceIds.has(id));
+    }
+    const finalizedJournal = { ...committedJournal, committedState: copyState() };
+    await chrome.storage.local.set({ ...finalizedJournal.committedState, [recoveryKey]: finalizedJournal });
+    recoveryJournal = finalizedJournal;
+    durableState = copyState();
+    await chrome.storage.local.remove(recoveryKey);
+    recoveryJournal = null;
+  } catch (error) {
+    if (!committed) {
+      applyState(previousState);
+      for (const id of preparedIds) {
+        excludedWindowIds.add(id);
+        try {
+          await chrome.windows.remove(id);
+        } catch (cleanupError) {
+          console.error('Could not remove incomplete replacement:', cleanupError);
+        }
+      }
+      if (recoveryJournal) await recoverTransition();
+    }
+    // After commit, leave fully prepared target open. Outgoing snapshots remain
+    // recoverable even if only some source windows closed or final save failed.
+    throw error;
+  }
+}
 
 // Create a new workspace
 async function createWorkspace(name, includeCurrentTabs = false, color = '#667eea') {
-  const workspaceId = Date.now().toString();
-  
-  console.log('Creating workspace:', { name, includeCurrentTabs, color });
-  
-  // Get ALL current windows
-  const allWindows = await chrome.windows.getAll({ populate: true });
-  
-  // Capture state and tabs from all windows
-  const windowsData = [];
-  
-  if (includeCurrentTabs) {
-    // Include current tabs - capture from existing windows
-    for (const window of allWindows) {
-      let windowState = { state: 'maximized' };
-      if (window.state === 'normal') {
-        windowState = {
-          left: window.left,
-          top: window.top,
-          width: window.width,
-          height: window.height,
-          state: 'normal'
-        };
-      } else {
-        windowState = { state: window.state };
-      }
-      
-      // Get tabs from this window
-      let windowTabs;
-      if (settings.sharePinnedTabs) {
-        // In shared mode, only get unpinned tabs (pinned tabs are shared)
-        windowTabs = window.tabs
-          .filter(tab => !tab.pinned && !isBlankTab(tab.url))
-          .map(tab => ({ url: tab.url, title: tab.title, pinned: false }));
-      } else {
-        // In separate mode, get all tabs including pinned (but exclude blank tabs)
-        windowTabs = window.tabs
-          .filter(tab => !isBlankTab(tab.url))
-          .map(tab => ({ 
-            url: tab.url, 
-            title: tab.title,
-            pinned: tab.pinned || false
-          }));
-      }
-      
-      // If all tabs were filtered out (all were blank), add at least one new tab
-      if (windowTabs.length === 0) {
-        windowTabs = [{ url: 'chrome://newtab', title: 'New Tab', pinned: false }];
-      }
-      
-      windowsData.push({
-        windowId: window.id,
-        windowState: windowState,
-        tabs: windowTabs
-      });
-    }
-  } else {
-    // Don't include current tabs - create with just a new tab
-    // Use first window's state as template
-    const firstWindow = allWindows[0];
-    let windowState = { state: 'maximized' };
-    if (firstWindow && firstWindow.state === 'normal') {
-      windowState = {
-        left: firstWindow.left,
-        top: firstWindow.top,
-        width: firstWindow.width,
-        height: firstWindow.height,
-        state: 'normal'
-      };
-    }
-    
-    windowsData.push({
-      windowId: firstWindow?.id || Date.now(),
-      windowState: windowState,
-      tabs: [{ url: 'chrome://newtab', title: 'New Tab', pinned: false }]
-    });
-  }
-  
-  // Calculate total tab count
-  const totalTabs = windowsData.reduce((sum, w) => sum + w.tabs.length, 0);
-  
-  console.log('Creating workspace with windows:', {
-    windowCount: allWindows.length,
-    windowIds: allWindows.map(w => w.id),
-    totalTabs: totalTabs,
-    windowsData: windowsData
-  });
-  
-  // Save workspace data with multiple windows
-  workspaces[workspaceId] = {
-    id: workspaceId,
-    name: name || `Workspace ${Object.keys(workspaces).length + 1}`,
-    windowIds: [],  // Will be set after window creation
-    windows: windowsData,
-    tabs: totalTabs, // Store total count for display
-    color: color || '#667eea',
-    createdAt: Date.now(),
-    lastAccessed: Date.now()
-  };
-  
-  console.log('Workspace created:', workspaces[workspaceId]);
-  
-  // If not including current tabs, we need to close and recreate windows
-  if (!includeCurrentTabs) {
-    console.log('Creating fresh workspace - closing current windows and creating new ones');
-    
-    // Set flag to prevent window removal listener from interfering
-    isSwitchingWorkspace = true;
-    
-    // Close all current windows
-    const currentWindows = await chrome.windows.getAll();
-    for (const window of currentWindows) {
-      await chrome.windows.remove(window.id).catch(() => {});
-    }
-    
-    // Create new window with empty tab
-    const newWindow = await chrome.windows.create({
-      focused: true,
-      state: windowsData[0].windowState.state || 'maximized',
-      ...(windowsData[0].windowState.state === 'normal' && {
-        left: windowsData[0].windowState.left,
-        top: windowsData[0].windowState.top,
-        width: windowsData[0].windowState.width,
-        height: windowsData[0].windowState.height
-      })
-    });
-    
-    const defaultTab = newWindow.tabs[0];
-    
-    // If shared pinned tabs are enabled, add them to the new window
-    if (settings.sharePinnedTabs && sharedPinnedTabs.length > 0) {
-      console.log('Adding shared pinned tabs:', sharedPinnedTabs.length);
-      for (const tab of sharedPinnedTabs) {
-        await chrome.tabs.create({
-          windowId: newWindow.id,
-          url: tab.url,
-          pinned: true
-        });
-      }
-      
-      // Remove the default new tab after adding pinned tabs
-      try {
-        await chrome.tabs.remove(defaultTab.id);
-      } catch (e) {
-        console.log('Could not remove default tab:', e);
-      }
-    }
-    // If no shared pinned tabs, keep the default new tab
-    
-    // Update workspace with new window ID
-    workspaces[workspaceId].windowIds = [newWindow.id];
-    workspaces[workspaceId].windows[0].windowId = newWindow.id;
-    
-    // Clear the switching flag after a delay
-    await new Promise(resolve => setTimeout(resolve, 500));
-    isSwitchingWorkspace = false;
-    
-    console.log('New window created:', newWindow.id);
-  } else {
-    // Including current tabs - just assign current window IDs
-    workspaces[workspaceId].windowIds = allWindows.map(w => w.id);
-    console.log('Using current windows:', workspaces[workspaceId].windowIds);
-  }
-  
-  activeWorkspaceId = workspaceId;
-  await saveState();
-  
-  console.log('Active workspace set to:', activeWorkspaceId, '(' + workspaces[workspaceId].name + ')');
-  updateBadge();
-  console.log('Badge updated for workspace:', workspaces[workspaceId].name.substring(0, 3).toUpperCase());
-  
-  return { success: true, workspaceId };
-}
-
-// Switch to a workspace
-async function switchWorkspace(workspaceId) {
-  if (!workspaces[workspaceId]) {
-    throw new Error('Workspace not found');
-  }
-  
-  const workspace = workspaces[workspaceId];
-  
-  console.log('=== Starting workspace switch ===');
-  console.log('From:', activeWorkspaceId, workspaces[activeWorkspaceId]?.name);
-  console.log('To:', workspaceId, workspace.name);
-  
-  // Set flag FIRST to prevent any interference
-  isSwitchingWorkspace = true;
-  
-  // Save current workspace state before switching
-  if (activeWorkspaceId && workspaces[activeWorkspaceId]) {
-    console.log('Saving current workspace state...');
+  return withTransition(async () => {
     await saveAllWorkspaceWindows();
-    console.log('Current workspace saved:', {
-      windows: workspaces[activeWorkspaceId].windows.length,
-      tabs: workspaces[activeWorkspaceId].tabs
-    });
-  }
-  
-  // Close ALL current windows
-  console.log('Closing all current windows...');
-  const allWindows = await chrome.windows.getAll();
-  for (const window of allWindows) {
-    await chrome.windows.remove(window.id).catch(() => {});
-  }
-  
-  // Recreate all windows for the target workspace
-  const newWindowIds = [];
-  
-  if (workspace.windows && workspace.windows.length > 0) {
-    for (let i = 0; i < workspace.windows.length; i++) {
-      const windowData = workspace.windows[i];
-      
-      // Build window creation options
-      const createOptions = {
-        focused: i === 0 // Focus first window
+    const previousState = copyState();
+    const allWindows = await chrome.windows.getAll({ populate: true });
+    let workspaceId = Date.now().toString();
+    while (workspaces[workspaceId]) workspaceId = (Number(workspaceId) + 1).toString();
+    const firstWindow = allWindows[0];
+    const template = firstWindow?.state === 'normal' ? {
+      state: 'normal', left: firstWindow.left, top: firstWindow.top,
+      width: firstWindow.width, height: firstWindow.height
+    } : { state: firstWindow?.state || 'maximized' };
+    const windowsData = includeCurrentTabs ? allWindows.map(window => {
+      const tabs = window.tabs.filter(tab => typeof tab.url === 'string' && tab.url.length > 0 && !isBlankTab(tab.url) && (!settings.sharePinnedTabs || !tab.pinned))
+        .map(tab => ({ url: tab.url, title: tab.title, pinned: tab.pinned || false }));
+      return {
+        windowId: window.id,
+        windowState: window.state === 'normal' ? {
+          state: 'normal', left: window.left, top: window.top, width: window.width, height: window.height
+        } : { state: window.state },
+        tabs: tabs.length ? tabs : [{ url: 'chrome://newtab', title: 'New Tab', pinned: false }]
       };
-      
-      // For normal state, set dimensions
-      if (windowData.windowState.state === 'normal' && windowData.windowState.width && windowData.windowState.height) {
-        createOptions.left = windowData.windowState.left;
-        createOptions.top = windowData.windowState.top;
-        createOptions.width = windowData.windowState.width;
-        createOptions.height = windowData.windowState.height;
-        createOptions.state = 'normal';
-      } else {
-        // For maximized/fullscreen, create in normal first, then update state
-        // This is because Chrome ignores dimensions when state is set during creation
-        createOptions.state = 'normal';
-      }
-      
-      const newWindow = await chrome.windows.create(createOptions);
-      newWindowIds.push(newWindow.id);
-      
-      // If the desired state is not normal, update it after creation
-      if (windowData.windowState.state !== 'normal') {
-        try {
-          await chrome.windows.update(newWindow.id, { 
-            state: windowData.windowState.state 
-          });
-        } catch (e) {
-          console.error('Failed to set window state:', e);
-        }
-      }
-      
-      // Remove default tab
-      const defaultTab = newWindow.tabs[0];
-      
-      // Determine which tabs to load
-      let tabsToLoad;
-      if (settings.sharePinnedTabs) {
-        // Shared mode: Load shared pinned tabs first, then workspace tabs
-        tabsToLoad = [...sharedPinnedTabs, ...windowData.tabs];
-      } else {
-        // Separate mode: Load all workspace tabs (includes pinned)
-        tabsToLoad = windowData.tabs;
-      }
-      
-      // Load pinned tabs first, then unpinned
-      const pinnedTabs = tabsToLoad.filter(tab => tab.pinned);
-      const unpinnedTabs = tabsToLoad.filter(tab => !tab.pinned);
-      
-      for (const tab of [...pinnedTabs, ...unpinnedTabs]) {
-        await chrome.tabs.create({
-          windowId: newWindow.id,
-          url: tab.url,
-          pinned: tab.pinned || false
-        });
-      }
-      
-      // Remove new tab pages
-      try {
-        await chrome.tabs.remove(defaultTab.id);
-      } catch (e) {}
+    }) : [{ windowState: template, tabs: [{ url: 'chrome://newtab', title: 'New Tab', pinned: false }] }];
+    workspaces[workspaceId] = {
+      id: workspaceId, name: name || `Workspace ${Object.keys(workspaces).length + 1}`,
+      color: color || '#667eea', createdAt: Date.now(), lastAccessed: Date.now(),
+      windowIds: [], windows: windowsData, tabs: windowsData.reduce((sum, window) => sum + window.tabs.length, 0)
+    };
+    if (includeCurrentTabs) {
+      const adoptedIds = allWindows.map(window => window.id);
+      for (const ws of Object.values(workspaces)) ws.windowIds = ws.windowIds.filter(id => !adoptedIds.includes(id));
+      workspaces[workspaceId].windowIds = adoptedIds;
+      activeWorkspaceId = workspaceId;
+      await saveState();
+    } else {
+      await replaceWorkspaceWindows(workspaceId, allWindows, previousState, true);
     }
-  } else {
-    // No saved windows, create a default one
-    const newWindow = await chrome.windows.create({
-      focused: true,
-      state: 'maximized'
-    });
-    newWindowIds.push(newWindow.id);
-  }
-  
-  workspace.windowIds = newWindowIds;
-  workspace.lastAccessed = Date.now();
-  activeWorkspaceId = workspaceId;
-  
-  console.log('Workspace switch complete. New windows:', newWindowIds);
-  console.log('Active workspace:', activeWorkspaceId, workspace.name);
-  
-  await saveState();
-  updateBadge();
-  
-  // Wait a bit to ensure all Chrome events have settled
-  await new Promise(resolve => setTimeout(resolve, 500));
-  
-  // Clear the switching flag AFTER everything is saved and settled
-  isSwitchingWorkspace = false;
-  
-  console.log('=== Workspace switch finished ===');
-  
+    return { success: true, workspaceId };
+  });
+}
+
+// Internal switch helper can run inside delete/import's owned transition.
+async function performWorkspaceSwitch(workspaceId, saveOutgoing = true) {
+  if (!workspaces[workspaceId]) throw new Error('Workspace not found');
+  if (saveOutgoing) await saveAllWorkspaceWindows();
+  const previousState = copyState();
+  const sourceWindows = await chrome.windows.getAll();
+  await replaceWorkspaceWindows(workspaceId, sourceWindows, previousState);
   return { success: true };
 }
 
-// Delete a workspace
+async function switchWorkspace(workspaceId) {
+  return withTransition(() => performWorkspaceSwitch(workspaceId));
+}
+
 async function deleteWorkspace(workspaceId) {
-  console.log('deleteWorkspace called for:', workspaceId);
-  console.log('Current workspaces:', Object.keys(workspaces));
-  
-  if (!workspaces[workspaceId]) {
-    console.error('Workspace not found:', workspaceId);
-    throw new Error('Workspace not found');
-  }
-  
-  const workspace = workspaces[workspaceId];
-  const wasActive = activeWorkspaceId === workspaceId;
-  console.log('Deleting workspace:', workspace.name, 'wasActive:', wasActive);
-  
-  // Set flag to prevent window removal listener from updating data
-  isSwitchingWorkspace = true;
-  
-  // Close all workspace windows if it's not the active workspace
-  if (!wasActive && workspace.windowIds) {
-    for (const windowId of workspace.windowIds) {
-      try {
-        console.log('Attempting to close window:', windowId);
-        await chrome.windows.remove(windowId);
-        console.log('Window closed successfully');
-      } catch (e) {
-        // Window may already be closed
-        console.log('Could not close window:', e);
+  if (!workspaces[workspaceId]) throw new Error('Workspace not found');
+  return withTransition(async () => {
+    const workspace = workspaces[workspaceId];
+    if (activeWorkspaceId === workspaceId) {
+      const remaining = Object.values(workspaces).filter(ws => ws.id !== workspaceId)
+        .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+      if (remaining.length) {
+        await performWorkspaceSwitch(remaining[0].id);
+      } else {
+        await saveAllWorkspaceWindows();
+        const previousState = copyState();
+        const sourceWindows = await chrome.windows.getAll();
+        delete workspaces[workspaceId];
+        activeWorkspaceId = null;
+        await replaceWorkspaceWindows(null, sourceWindows, previousState);
+        return { success: true };
+      }
+    } else {
+      const liveWindows = await chrome.windows.getAll();
+      for (const window of liveWindows) {
+        if (workspace.windowIds.includes(window.id)) await chrome.windows.remove(window.id);
       }
     }
-  }
-  
-  delete workspaces[workspaceId];
-  console.log('Workspace deleted, remaining:', Object.keys(workspaces).length);
-  
-  // If deleting the active workspace, switch to the last visited one
-  if (wasActive) {
-    console.log('Active workspace deleted, switching to another...');
-    activeWorkspaceId = null;
-    
-    // Find remaining workspaces sorted by last accessed
-    const remainingWorkspaces = Object.values(workspaces)
-      .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
-    
-    if (remainingWorkspaces.length > 0) {
-      // Switch to the most recently accessed workspace
-      const nextWorkspace = remainingWorkspaces[0];
-      console.log('Switching to workspace:', nextWorkspace.name);
-      await saveState();
-      await switchWorkspace(nextWorkspace.id);
-    } else {
-      // No workspaces left, create a blank window
-      console.log('No workspaces remaining, creating blank window');
-      await chrome.windows.create({
-        focused: true,
-        state: 'maximized'
-      });
-      await saveState();
-      updateBadge();
-    }
-  } else {
-    console.log('Non-active workspace deleted, saving state');
+    delete workspaces[workspaceId];
     await saveState();
-    updateBadge();
-  }
-  
-  // Clear the flag
-  isSwitchingWorkspace = false;
-  
-  console.log('Delete workspace completed successfully');
-  return { success: true };
+    return { success: true };
+  });
 }
 
 // Update workspace
@@ -698,80 +586,34 @@ async function exportBackup() {
 
 // Import backup
 async function importBackup(data) {
-  if (!data || !data.workspaces) {
-    throw new Error('Invalid backup data');
-  }
-  
-  // Close all current workspace windows
-  const allWindows = await chrome.windows.getAll();
-  for (const window of allWindows) {
-    try {
-      await chrome.windows.remove(window.id);
-    } catch (e) {
-      // Continue even if window close fails
+  if (!data || !data.workspaces) throw new Error('Invalid backup data');
+  return withTransition(async () => {
+    await saveAllWorkspaceWindows();
+    const previousState = copyState();
+    const sourceWindows = await chrome.windows.getAll();
+    settings = data.settings || { sharePinnedTabs: false };
+    sharedPinnedTabs = data.sharedPinnedTabs || [];
+    workspaces = {};
+    for (const [id, workspace] of Object.entries(data.workspaces)) {
+      const restored = JSON.parse(JSON.stringify(workspace));
+      restored.windowIds = [];
+      delete restored.windowId;
+      if (settings.sharePinnedTabs && restored.windows) {
+        restored.windows = restored.windows.map(window => ({ ...window, tabs: window.tabs.filter(tab => !tab.pinned) }));
+      }
+      workspaces[id] = restored;
     }
-  }
-  
-  // Restore settings
-  if (data.settings) {
-    settings = data.settings;
-  } else {
-    settings = { sharePinnedTabs: false }; // Default for old backups
-  }
-  
-  // Restore shared pinned tabs
-  if (data.sharedPinnedTabs) {
-    sharedPinnedTabs = data.sharedPinnedTabs;
-  } else {
-    sharedPinnedTabs = [];
-  }
-  
-  // Restore workspaces (without window IDs as they're closed)
-  workspaces = {};
-  for (const [id, workspace] of Object.entries(data.workspaces)) {
-    const restoredWorkspace = {
-      ...workspace,
-      windowId: null // Reset window ID as old windows are closed
-    };
-    
-    // If sharePinnedTabs is enabled, remove pinned tabs from workspace windows
-    // to prevent duplication (they'll be loaded from sharedPinnedTabs)
-    if (settings.sharePinnedTabs && restoredWorkspace.windows) {
-      restoredWorkspace.windows = restoredWorkspace.windows.map(window => ({
-        ...window,
-        tabs: window.tabs.filter(tab => !tab.pinned)
-      }));
-    }
-    
-    workspaces[id] = restoredWorkspace;
-  }
-  
-  activeWorkspaceId = null;
-  await saveState();
-  
-  // If there were workspaces, switch to the previously active one or most recent
-  const workspaceArray = Object.values(workspaces);
-  if (workspaceArray.length > 0) {
-    let targetWorkspace;
-    if (data.activeWorkspaceId && workspaces[data.activeWorkspaceId]) {
-      targetWorkspace = workspaces[data.activeWorkspaceId];
+    activeWorkspaceId = null;
+    const workspaceArray = Object.values(workspaces);
+    const target = workspaces[data.activeWorkspaceId] || workspaceArray
+      .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+    if (target) {
+      await replaceWorkspaceWindows(target.id, sourceWindows, previousState);
     } else {
-      // Find most recently accessed
-      targetWorkspace = workspaceArray.sort((a, b) => b.lastAccessed - a.lastAccessed)[0];
+      await replaceWorkspaceWindows(null, sourceWindows, previousState);
     }
-    
-    if (targetWorkspace) {
-      await switchWorkspace(targetWorkspace.id);
-    }
-  } else {
-    // No workspaces to restore, create blank window
-    await chrome.windows.create({
-      focused: true,
-      state: 'maximized'
-    });
-  }
-  
-  return { success: true, count: workspaceArray.length };
+    return { success: true, count: workspaceArray.length };
+  });
 }
 
 // Update settings
@@ -782,18 +624,34 @@ async function updateSettings(newSettings) {
   if (settings.sharePinnedTabs && activeWorkspaceId && workspaces[activeWorkspaceId]) {
     try {
       const workspace = workspaces[activeWorkspaceId];
-      const window = await chrome.windows.get(workspace.windowId, { populate: true });
+      // Get pinned tabs from all windows in the workspace
+      const allPinnedTabs = [];
+      if (workspace.windowIds && workspace.windowIds.length > 0) {
+        for (const windowId of workspace.windowIds) {
+          try {
+            const window = await chrome.windows.get(windowId, { populate: true });
+            const pinnedTabs = window.tabs.filter(tab => tab.pinned).map(tab => ({
+              url: tab.url,
+              title: tab.title,
+              pinned: true
+            }));
+            allPinnedTabs.push(...pinnedTabs);
+          } catch (e) {
+            // Window may be closed
+          }
+        }
+      }
       
       // Extract pinned tabs to shared
-      sharedPinnedTabs = window.tabs.filter(tab => tab.pinned).map(tab => ({
-        url: tab.url,
-        title: tab.title,
-        pinned: true
-      }));
+      sharedPinnedTabs = allPinnedTabs;
       
       // Remove pinned tabs from all workspaces
       for (const ws of Object.values(workspaces)) {
-        ws.tabs = ws.tabs.filter(tab => !tab.pinned);
+        if (ws.windows) {
+          for (const windowData of ws.windows) {
+            windowData.tabs = windowData.tabs.filter(tab => !tab.pinned);
+          }
+        }
       }
     } catch (e) {
       // Continue even if window not found
@@ -817,8 +675,16 @@ async function saveAllWorkspaceWindows() {
   }
   
   const workspace = workspaces[activeWorkspaceId];
-  const allWindows = await chrome.windows.getAll({ populate: true });
-  
+  const allWindows = (await chrome.windows.getAll({ populate: true }))
+    .filter(window => !excludedWindowIds.has(window.id) && (workspace.windowIds.includes(window.id) ||
+      !Object.entries(workspaces).some(([id, ws]) => id !== activeWorkspaceId && ws.windowIds?.includes(window.id))));
+
+  if (allWindows.length === 0) {
+    workspace.windowIds = [];
+    await saveState();
+    return;
+  }
+
   console.log('saveAllWorkspaceWindows: Found', allWindows.length, 'windows');
   
   // Save data for all current windows
@@ -842,7 +708,7 @@ async function saveAllWorkspaceWindows() {
     if (settings.sharePinnedTabs) {
       // In shared mode, save shared pinned tabs separately (exclude blank tabs)
       const pinnedTabs = window.tabs
-        .filter(tab => tab.pinned && !isBlankTab(tab.url))
+        .filter(tab => tab.pinned && typeof tab.url === 'string' && tab.url.length > 0 && !isBlankTab(tab.url))
         .map(tab => ({
           url: tab.url,
           title: tab.title,
@@ -854,7 +720,7 @@ async function saveAllWorkspaceWindows() {
       
       // Only save unpinned tabs to workspace (exclude blank tabs)
       windowTabs = window.tabs
-        .filter(tab => !tab.pinned && !isBlankTab(tab.url))
+        .filter(tab => !tab.pinned && typeof tab.url === 'string' && tab.url.length > 0 && !isBlankTab(tab.url))
         .map(tab => ({
           url: tab.url,
           title: tab.title,
@@ -863,7 +729,7 @@ async function saveAllWorkspaceWindows() {
     } else {
       // Save all tabs including pinned (exclude blank tabs)
       windowTabs = window.tabs
-        .filter(tab => !isBlankTab(tab.url))
+        .filter(tab => typeof tab.url === 'string' && tab.url.length > 0 && !isBlankTab(tab.url))
         .map(tab => ({ 
           url: tab.url, 
           title: tab.title,
@@ -890,92 +756,42 @@ async function saveAllWorkspaceWindows() {
   await saveState();
 }
 
-// Save current workspace tabs
+// Save current workspace tabs (used for backup export)
 async function saveCurrentWorkspaceTabs() {
   if (!activeWorkspaceId || !workspaces[activeWorkspaceId]) return;
   
-  const workspace = workspaces[activeWorkspaceId];
-  
-  try {
-    const window = await chrome.windows.get(workspace.windowId, { populate: true });
-    
-    if (settings.sharePinnedTabs) {
-      // Separate pinned and unpinned tabs (exclude blank tabs)
-      const pinnedTabs = window.tabs
-        .filter(tab => tab.pinned && !isBlankTab(tab.url))
-        .map(tab => ({
-          url: tab.url,
-          title: tab.title,
-          pinned: true
-        }));
-      const unpinnedTabs = window.tabs
-        .filter(tab => !tab.pinned && !isBlankTab(tab.url))
-        .map(tab => ({
-          url: tab.url,
-          title: tab.title,
-          pinned: false
-        }));
-      
-      // Update shared pinned tabs
-      sharedPinnedTabs = pinnedTabs;
-      
-      // Save only unpinned tabs to workspace
-      workspace.tabs = unpinnedTabs;
-    } else {
-      // Save all tabs (including pinned) to workspace (exclude blank tabs)
-      workspace.tabs = window.tabs
-        .filter(tab => !isBlankTab(tab.url))
-        .map(tab => ({
-          url: tab.url,
-          title: tab.title,
-          pinned: tab.pinned || false
-        }));
-    }
-    
-    await saveState();
-  } catch (e) {
-    // Window may be closed
-  }
+  // Use the comprehensive saveAllWorkspaceWindows instead
+  await saveAllWorkspaceWindows();
 }
 
-// Save current window state (size and position)
+// Save current window state (size and position) - used for backup export
 async function saveCurrentWindowState() {
   if (!activeWorkspaceId || !workspaces[activeWorkspaceId]) return;
   
-  const workspace = workspaces[activeWorkspaceId];
-  
-  try {
-    const window = await chrome.windows.get(workspace.windowId);
-    
-    // Save window dimensions if in normal state
-    if (window.state === 'normal') {
-      workspace.windowState = {
-        left: window.left,
-        top: window.top,
-        width: window.width,
-        height: window.height,
-        state: 'normal'
-      };
-    } else {
-      workspace.windowState = {
-        state: window.state
-      };
-    }
-    
-    await saveState();
-  } catch (e) {
-    // Window may be closed
-  }
+  // Use the comprehensive saveAllWorkspaceWindows instead
+  await saveAllWorkspaceWindows();
 }
 
 // Save state to storage
 async function saveState() {
-  await chrome.storage.local.set({ 
-    workspaces, 
-    activeWorkspaceId, 
-    sharedPinnedTabs, 
-    settings 
-  });
+  const state = copyState();
+  if (discardStartupOnSave) {
+    const startup = { sessionId: recoverySessionId, state: null };
+    await chrome.storage.local.set({ ...state, workspaceStartup: startup });
+    recoveryMetadata = startup;
+    startupState = null;
+    startupSuperseded = true;
+    durableState = state;
+    updateBadge();
+    return;
+  }
+  if (recoveryJournal) {
+    if (recoveryJournal.phase === 'committed') recoveryJournal.committedState = state;
+    await chrome.storage.local.set({ ...state, [recoveryKey]: recoveryJournal });
+  } else {
+    await chrome.storage.local.set(state);
+  }
+  durableState = state;
   updateBadge();
 }
 
@@ -993,61 +809,34 @@ function updateBadge() {
   }
 }
 
-// Monitor window closures
-chrome.windows.onRemoved.addListener(async (windowId) => {
-  // Don't update workspace data if we're in the middle of switching workspaces
-  if (isSwitchingWorkspace) {
-    console.log('Ignoring window removal during workspace switch:', windowId);
-    return;
-  }
-  
-  // Find workspace with this window and remove it from the array
-  for (const [id, workspace] of Object.entries(workspaces)) {
-    if (workspace.windowIds && workspace.windowIds.includes(windowId)) {
-      console.log('Window closed, removing from workspace:', windowId);
-      // Remove this window ID from the array
-      workspace.windowIds = workspace.windowIds.filter(wId => wId !== windowId);
-      
-      // Also remove from windows data
-      if (workspace.windows) {
-        workspace.windows = workspace.windows.filter(w => w.windowId !== windowId);
+// Window removals update live IDs, not the recoverable saved windows.
+chrome.windows.onRemoved.addListener(windowId => {
+  return runStateOperation(async () => {
+    let changed = false;
+    for (const workspace of Object.values(workspaces)) {
+      if (workspace.windowIds.includes(windowId)) {
+        workspace.windowIds = workspace.windowIds.filter(id => id !== windowId);
+        changed = true;
       }
-      
-      await saveState();
-      break;
     }
-  }
+    if (changed) await saveState();
+  }).catch(reportEventError);
 });
 
-// Monitor window state changes (resize, move, maximize, etc.)
-let saveWindowStateTimeout;
-chrome.windows.onBoundsChanged.addListener(async (window) => {
-  // Don't save during workspace switching
-  if (isSwitchingWorkspace) {
-    console.log('Ignoring bounds change during workspace switch:', window.id);
-    return;
+chrome.windows.onBoundsChanged?.addListener(window => scheduleWorkspaceSave(window.id));
+chrome.tabs.onCreated.addListener(tab => scheduleWorkspaceSave(tab.windowId));
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (['url', 'title', 'pinned', 'status'].some(key => Object.prototype.hasOwnProperty.call(changeInfo, key))) {
+    return scheduleWorkspaceSave(tab.windowId);
   }
-  
-  // Debounce - wait 500ms after last change before saving
-  clearTimeout(saveWindowStateTimeout);
-  saveWindowStateTimeout = setTimeout(async () => {
-    // Double-check we're not switching
-    if (isSwitchingWorkspace) {
-      console.log('Ignoring debounced bounds change during workspace switch');
-      return;
-    }
-    
-    // Find workspace with this window
-    if (activeWorkspaceId && workspaces[activeWorkspaceId]) {
-      const workspace = workspaces[activeWorkspaceId];
-      // Check if this window belongs to the active workspace
-      if (workspace.windowIds && workspace.windowIds.includes(window.id)) {
-        // Save state of all windows in the workspace
-        await saveAllWorkspaceWindows();
-      }
-    }
-  }, 500);
 });
+chrome.tabs.onRemoved.addListener((tabId, info) => {
+  if (!info.isWindowClosing) return scheduleWorkspaceSave(info.windowId);
+  return runStateOperation(() => {}).catch(reportEventError);
+});
+chrome.tabs.onMoved.addListener((tabId, info) => scheduleWorkspaceSave(info.windowId));
+chrome.tabs.onAttached.addListener((tabId, info) => scheduleWorkspaceSave(info.newWindowId));
+chrome.tabs.onDetached.addListener((tabId, info) => scheduleWorkspaceSave(info.oldWindowId));
 
 // Helper function to restore active workspace window state
 async function restoreActiveWindowState(window) {
@@ -1094,26 +883,33 @@ async function restoreActiveWindowState(window) {
     console.error('Error updating tabs from window:', e);
   }
   
-  // Restore window dimensions if we have them
-  if (!workspace.windowState) {
+  // Restore window dimensions from the workspace windows array
+  if (!workspace.windows || workspace.windows.length === 0) {
+    await saveState();
+    return;
+  }
+
+  // Find the first saved window state (since this is startup, we're restoring to the first window)
+  const savedWindowState = workspace.windows[0].windowState;
+  if (!savedWindowState) {
     await saveState();
     return;
   }
   
   const updateInfo = {};
   
-  if (workspace.windowState.state === 'normal' && 
-      workspace.windowState.width && 
-      workspace.windowState.height) {
-    // Restore normal state with dimensions
+  if (savedWindowState.state === 'normal' &&
+      savedWindowState.width &&
+      savedWindowState.height) {
+    // Restore normal state with dimensions (including position/display)
     updateInfo.state = 'normal';
-    updateInfo.left = workspace.windowState.left;
-    updateInfo.top = workspace.windowState.top;
-    updateInfo.width = workspace.windowState.width;
-    updateInfo.height = workspace.windowState.height;
-  } else if (workspace.windowState.state) {
+    updateInfo.left = savedWindowState.left;
+    updateInfo.top = savedWindowState.top;
+    updateInfo.width = savedWindowState.width;
+    updateInfo.height = savedWindowState.height;
+  } else if (savedWindowState.state) {
     // Restore maximized or fullscreen state
-    updateInfo.state = workspace.windowState.state;
+    updateInfo.state = savedWindowState.state;
   }
   
   try {
@@ -1126,57 +922,28 @@ async function restoreActiveWindowState(window) {
   }
 }
 
-// Clean up multiple windows on startup
-async function cleanupMultipleWindows() {
-  try {
-    const allWindows = await chrome.windows.getAll();
-    
-    // If we only have one window, restore its state and we're done
-    if (allWindows.length === 1) {
-      await restoreActiveWindowState(allWindows[0]);
-      return;
-    }
-    
-    // Find the active workspace window
-    let activeWindow = null;
-    if (activeWorkspaceId && workspaces[activeWorkspaceId]) {
-      const workspace = workspaces[activeWorkspaceId];
-      // Check if any of the workspace's windows still exist
-      if (workspace.windowIds && workspace.windowIds.length > 0) {
-        for (const windowId of workspace.windowIds) {
-          try {
-            activeWindow = await chrome.windows.get(windowId);
-            // Restore the window state if found
-            await restoreActiveWindowState(activeWindow);
-            break; // Found a valid window, stop looking
-          } catch (e) {
-            // Window doesn't exist, try next one
-          }
-        }
-      }
-    }
-    
-    // If no active window found, keep the first window and make it active
-    if (!activeWindow && allWindows.length > 0) {
-      activeWindow = allWindows[0];
-      // Use the restore function to handle workspace association and state
-      await restoreActiveWindowState(activeWindow);
-    }
-    
-    // Close all other windows
-    for (const window of allWindows) {
-      if (activeWindow && window.id !== activeWindow.id) {
-        try {
-          await chrome.windows.remove(window.id);
-        } catch (e) {
-          // Window might already be closed
-        }
-      }
-    }
-    
-    await saveState();
-    updateBadge();
-  } catch (e) {
-    console.error('Error cleaning up windows:', e);
+// Restore workspace windows on startup - overrides Chrome's startup behavior
+async function restoreWorkspaceOnStartup() {
+  if (!startupState) return;
+  const initialState = startupState;
+  const workspace = initialState.workspaces[initialState.activeWorkspaceId];
+  // No valid saved target: Chrome's own session is safer than a blank replacement.
+  const valid = workspace && Array.isArray(workspace.windows) && workspace.windows.length > 0 &&
+    workspace.windows.every(window => window && window.windowState && Array.isArray(window.tabs) &&
+      window.tabs.every(tab => tab && typeof tab.url === 'string' && tab.url.length > 0));
+  if (!valid) {
+    startupState = null;
+    return;
   }
+  applyState(initialState);
+  // Earlier startup events may have adopted Chrome's session. Re-establish the
+  // original durable target before any restoration API can fail.
+  await saveState();
+  // Unlike an explicit switch, startup must not snapshot Chrome's unrelated
+  // startup session over the stored workspace it is about to restore.
+  await withTransition(() => performWorkspaceSwitch(activeWorkspaceId, false));
+  await chrome.storage.local.remove('workspaceStartup');
+  recoveryMetadata = null;
+  startupState = null;
+  return { success: true };
 }
