@@ -564,6 +564,132 @@ test('valid backup import/export retains settings and restores windows', async (
   assert.equal(env.state('isSwitchingWorkspace'), false);
 });
 
+const invalidBackups = [
+  ['missing workspace map', { version: '1.0.1' }],
+  ['unsupported legacy record without windows', { workspaces: { a: { ...saved('a'), windows: undefined } } }],
+  ['non-object workspace map', { workspaces: [] }],
+  ['empty workspace map with invalid value', { workspaces: { a: null } }],
+  ['mismatched workspace ID', { workspaces: { a: saved('b') } }],
+  ['null nested window', { workspaces: { a: saved('a', undefined, { windows: [null] }) } }],
+  ['null tab list entry', { workspaces: { a: saved('a', undefined, { windows: [{ windowState: { state: 'normal' }, tabs: [null] }] }) } }],
+  ['unsafe active workspace ID', { workspaces: { a: saved('a') }, activeWorkspaceId: '__proto__' }],
+  ['unsupported backup version', { version: '9.9.9', workspaces: {} }],
+  ['unproven legacy backup version', { version: '1.0', workspaces: {} }],
+  ['unsafe color string', { workspaces: { a: saved('a', undefined, { color: 'red" onmouseover="alert(1)' }) } }],
+  ['malformed JavaScript URL', { workspaces: { a: saved('a', 'javascript:alert(1)') } }],
+  ['unrestorable browser internal URL', { workspaces: { a: saved('a', 'chrome://settings') } }],
+  ['partial normal window geometry', { workspaces: { a: saved('a', undefined, { windows: [{ windowState: { state: 'normal', width: 800 }, tabs: [] }] }) } }],
+  ['invalid settings type', { workspaces: { a: saved('a') }, settings: { sharePinnedTabs: 'yes' } }],
+  ['null shared pin', { workspaces: {}, sharedPinnedTabs: [null] }],
+  ['malformed workspace-level tab record', { workspaces: { a: saved('a', undefined, { tabs: [null] }) } }],
+  ['invalid non-normal window geometry', { workspaces: { a: saved('a', undefined, { windows: [{ windowState: { state: 'maximized', width: 800 }, tabs: [] }] }) } }]
+];
+
+for (const [description, invalidData] of invalidBackups) {
+  test(`invalid backup ${description} rejects before snapshot, storage, or window effects`, async () => {
+    const env = harness();
+    await env.complete(env.message('getWorkspaces'));
+    const initialState = env.stored();
+    const initialOpen = [...env.open.values()];
+    const callsBefore = env.calls.length;
+    const writesBefore = env.storageWrites.length;
+    const result = await env.complete(env.message('importBackup', { data: invalidData }));
+    assert.match(result.error || '', /Invalid backup data/);
+    assert.deepEqual(env.stored(), initialState);
+    assert.deepEqual([...env.open.values()], initialOpen);
+    assert.equal(env.calls.slice(callsBefore).filter(call => call.name.startsWith('windows.') || call.name.startsWith('tabs.')).length, 0);
+    assert.equal(env.storageWrites.length, writesBefore);
+    assert.equal(env.state('isSwitchingWorkspace'), false);
+  });
+}
+
+test('versionless valid backup normalizes optional settings and pins without mutating input', async () => {
+  const env = harness();
+  const source = { workspaces: { a: saved('a', 'about:blank') }, activeWorkspaceId: 'a' };
+  const original = copy(source);
+  const result = await env.complete(env.message('importBackup', { data: source }));
+  assert.equal(result.success, true);
+  assert.deepEqual(source, original);
+  assert.deepEqual(env.stored().settings, { sharePinnedTabs: false });
+  assert.deepEqual(env.stored().sharedPinnedTabs, []);
+  assert.deepEqual(urls(env.stored().workspaces.a), ['about:blank']);
+});
+
+test('shared-pin normalization prunes copied workspace tabs without mutating backup', async () => {
+  const env = harness();
+  const source = { version: '1.0.1', workspaces: { a: saved('a', undefined, { windows: [{
+    windowState: { state: 'maximized' },
+    tabs: [{ url: 'https://pin.test/', pinned: true }, { url: 'https://keep.test/', pinned: false }]
+  }] }) }, activeWorkspaceId: 'a', settings: { sharePinnedTabs: true },
+  sharedPinnedTabs: [{ url: 'https://shared.test/', pinned: true }] };
+  const original = copy(source);
+  const result = await env.complete(env.message('importBackup', { data: source }));
+  assert.equal(result.success, true);
+  assert.deepEqual(source, original);
+  assert.deepEqual(urls(env.stored().workspaces.a), ['https://keep.test/']);
+  assert.deepEqual([...env.open.values()][0].tabs.map(tab => tab.url), ['https://shared.test/', 'https://keep.test/']);
+});
+
+test('valid empty backup remains supported', async () => {
+  const env = harness();
+  const result = await env.complete(env.message('importBackup', { data: { version: '1.0.1', workspaces: {} } }));
+  assert.equal(result.success, true);
+  assert.equal(result.count, 0);
+  assert.deepEqual(env.stored().workspaces, {});
+});
+
+test('import ignores duplicate stale live window IDs and replaces them with runtime IDs', async () => {
+  const env = harness();
+  const workspace = saved('a', 'https://saved.test/', { windowIds: [1, 1] });
+  const result = await env.complete(env.message('importBackup', { data: { workspaces: { a: workspace }, activeWorkspaceId: 'a' } }));
+  assert.equal(result.success, true);
+  assert.equal(new Set(env.stored().workspaces.a.windowIds).size, env.stored().workspaces.a.windowIds.length);
+  assert.deepEqual(env.stored().workspaces.a.windowIds, [...env.open.keys()]);
+});
+
+test('data URL with spaces passes validator and survives import exactly', async () => {
+  const env = harness();
+  const url = 'data:text/html,workspace persistence smoke';
+  assert.equal(env.state(`isSafeBackupUrl(${JSON.stringify(url)})`), true);
+  const workspace = saved('a', url);
+  const result = await env.complete(env.message('importBackup', { data: { workspaces: { a: workspace }, activeWorkspaceId: 'a' } }));
+  assert.equal(result.success, true);
+  assert.equal(env.stored().workspaces.a.windows[0].tabs[0].url, url);
+  assert.equal([...env.open.values()][0].tabs.some(tab => tab.url === url), true);
+});
+
+test('restoreable exported URL protocols remain accepted', async () => {
+  const env = harness();
+  const supportedUrls = [
+    'https://site.test/path?q=1#top',
+    'file:///tmp/workspace.html',
+    'data:text/html,workspace persistence smoke',
+    'chrome-extension://test/options.html',
+    'about:blank',
+    'chrome://newtab',
+    'edge://newtab',
+    'dia://new-tab-page',
+    'moz-extension://test/options.html',
+    'safari-web-extension://test/options.html'
+  ];
+  const workspace = saved('a', supportedUrls[0], { windows: [{ windowState: { state: 'normal' },
+    tabs: supportedUrls.map(url => ({ url, pinned: false })) }] });
+  const result = await env.complete(env.message('importBackup', { data: { workspaces: { a: workspace }, activeWorkspaceId: 'a' } }));
+  assert.equal(result.success, true);
+  assert.deepEqual(env.stored().workspaces.a.windows[0].tabs.map(tab => tab.url), supportedUrls);
+});
+
+test('backup workspace object rejects prototype-pollution keys', async () => {
+  const data = JSON.parse('{"workspaces":{"__proto__":{"id":"__proto__","name":"bad","color":"#112233","createdAt":1,"lastAccessed":1,"windowIds":[],"windows":[],"tabs":0}}}');
+  const env = harness();
+  await env.complete(env.message('getWorkspaces'));
+  const callsBefore = env.calls.length;
+  const result = await env.complete(env.message('importBackup', { data }));
+  assert.match(result.error || '', /Invalid backup data/);
+  assert.equal(env.calls.slice(callsBefore).filter(call => call.name.startsWith('windows.') || call.name.startsWith('tabs.')).length, 0);
+});
+
+
 test('delete active workspace serializes replacement switch without deadlock', async () => {
   const env = harness();
   const result = await env.complete(env.message('deleteWorkspace', { workspaceId: 'a' }));
@@ -822,9 +948,143 @@ test('blank-only windows retain fallback and normal/maximized state with pinned 
   assert.deepEqual(windows[1].tabs.map(tab => tab.url), ['chrome://newtab']);
 });
 
+function pinWindow(id, urls) {
+  const window = live(id, urls);
+  for (const tab of window.tabs) tab.pinned = true;
+  return window;
+}
+
+for (const shareInitially of [false, true]) {
+  test(`shared pins aggregate distinct windows when ${shareInitially ? 'saving' : 'enabling'}`, async () => {
+    const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
+      settings: { sharePinnedTabs: shareInitially } },
+      windows: [pinWindow(1, ['https://one.test/']), pinWindow(2, ['https://two.test/'])] });
+    const result = await env.complete(env.message(shareInitially ? 'exportBackup' : 'updateSettings',
+      shareInitially ? {} : { settings: { sharePinnedTabs: true } }));
+    assert.equal(result.success, true);
+    assert.deepEqual(env.stored().sharedPinnedTabs.map(tab => tab.url), ['https://one.test/', 'https://two.test/']);
+  });
+}
+
+test('shared pins count intentional duplicate multiplicity in a single window', async () => {
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a', settings: { sharePinnedTabs: true } },
+    windows: [pinWindow(1, ['https://one.test/', 'https://one.test/'])] });
+  await env.complete(env.message('exportBackup'));
+  assert.deepEqual(env.stored().sharedPinnedTabs.map(tab => tab.url), ['https://one.test/', 'https://one.test/']);
+});
+
+test('shared pins keep intentional duplicates without multiplying replicated windows', async () => {
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: true } }, windows: [
+    pinWindow(1, ['https://one.test/', 'https://one.test/', 'https://two.test/']),
+    pinWindow(2, ['https://one.test/', 'https://one.test/', 'https://two.test/'])
+  ] });
+  assert.equal((await env.complete(env.message('exportBackup'))).success, true);
+  assert.deepEqual(env.stored().sharedPinnedTabs.map(tab => tab.url),
+    ['https://one.test/', 'https://one.test/', 'https://two.test/']);
+  assert.equal((await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: true } }))).success, true);
+  assert.equal(env.stored().sharedPinnedTabs.length, 3);
+});
+
+test('removing every live shared pin clears saved pins', async () => {
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: true }, sharedPinnedTabs: [{ url: 'https://removed.test/', pinned: true }] } });
+  assert.equal((await env.complete(env.message('exportBackup'))).success, true);
+  assert.deepEqual(env.stored().sharedPinnedTabs, []);
+});
+
+test('disabling sharing snapshots active tab edits before debounce expires', async () => {
+  const window = live(1, ['https://pin.test/', 'https://before.test/']);
+  window.tabs[0].pinned = true;
+  const env = harness({ data: { workspaces: { a: saved('a'), b: saved('b') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: true }, sharedPinnedTabs: [{ url: 'https://pin.test/', pinned: true }] }, windows: [window] });
+  env.open.get(1).tabs[1].url = 'https://latest.test/';
+  env.chrome.tabs.onUpdated.emit(101, { url: 'https://latest.test/' }, env.open.get(1).tabs[1]);
+  await pump();
+  env.timers.clear();
+  assert.equal((await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: false } }))).success, true);
+  assert(env.stored().workspaces.a.windows[0].tabs.some(tab => tab.url === 'https://latest.test/'));
+  assert(env.stored().workspaces.a.windows[0].tabs.some(tab => tab.url === 'https://pin.test/' && tab.pinned));
+});
+
+test('disabling sharing immediately uses live pin changes before debounce', async () => {
+  const env = harness({ data: { workspaces: { a: saved('a'), b: saved('b', undefined, { windows: [{ windowState: { state: 'normal' }, tabs: [
+    { url: 'https://inactive-content.test/', title: 'Content', pinned: false }
+  ] }] }) }, activeWorkspaceId: 'a', settings: { sharePinnedTabs: true },
+    sharedPinnedTabs: [{ url: 'https://removed.test/', pinned: true }] },
+    windows: [pinWindow(1, ['https://new.test/'])] });
+  assert.equal((await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: false } }))).success, true);
+  assert.deepEqual(env.stored().workspaces.a.windows[0].tabs.filter(tab => tab.pinned).map(tab => tab.url), ['https://new.test/']);
+  assert.deepEqual(env.stored().workspaces.b.windows[0].tabs.filter(tab => tab.pinned).map(tab => tab.url), ['https://new.test/']);
+});
+
+test('disabling shared pins snapshots active workspace pins before switching away', async () => {
+  const env = harness({ data: { workspaces: { a: saved('a'), b: saved('b') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: true }, sharedPinnedTabs: [{ url: 'https://one.test/', pinned: true }] },
+    windows: [pinWindow(1, ['https://one.test/'])] });
+  assert.equal((await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: false } }))).success, true);
+  assert.equal(env.stored().workspaces.a.windows[0].tabs[0].pinned, true);
+  assert.equal(env.stored().workspaces.a.windows[0].tabs[0].url, 'https://one.test/');
+});
+
+test('disabling shared pins creates a restorable window for workspaces without saved windows', async () => {
+  const env = harness({ data: { workspaces: {
+    a: saved('a', 'https://active.test/', { windows: [] }),
+    b: saved('b', 'https://inactive.test/', { windows: [] })
+  }, activeWorkspaceId: 'a', settings: { sharePinnedTabs: true },
+    sharedPinnedTabs: [{ url: 'https://shared.test/', pinned: true }] },
+    windows: [pinWindow(1, ['https://shared.test/'])] });
+  assert.equal((await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: false } }))).success, true);
+  for (const id of ['a', 'b']) {
+    assert.equal(env.stored().workspaces[id].windows.length, 1);
+    assert(env.stored().workspaces[id].windows[0].tabs.some(tab => tab.url === 'https://shared.test/' && tab.pinned));
+  }
+});
+
+test('disabling shared pins with no live windows keeps pins restorable', async () => {
+  const pins = [{ url: 'https://saved-pin.test/', title: 'Saved', pinned: true }];
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: true }, sharedPinnedTabs: pins }, windows: [] });
+  assert.equal((await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: false } }))).success, true);
+  assert.deepEqual(env.stored().workspaces.a.windows[0].tabs.filter(tab => tab.pinned), pins);
+  assert.equal((await env.complete(env.message('switchWorkspace', { workspaceId: 'a' }))).success, true);
+  assert.equal([...env.open.values()][0].tabs.some(tab => tab.url === pins[0].url && tab.pinned), true);
+});
+
+test('disabling shared pins with live windows clears global shared list', async () => {
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: true }, sharedPinnedTabs: [{ url: 'https://pin.test/', pinned: true }] },
+    windows: [pinWindow(1, ['https://pin.test/'])] });
+  assert.equal((await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: false } }))).success, true);
+  assert.deepEqual(env.stored().sharedPinnedTabs, []);
+  assert.deepEqual(env.stored().workspaces.a.windows[0].tabs.filter(tab => tab.pinned).map(tab => tab.url), ['https://pin.test/']);
+  assert.equal(env.stored().workspaces.a.windows[0].tabs[0].pinned, true);
+});
+
+test('failed shared-pin collection keeps old settings and pins', async () => {
+  const oldPin = { url: 'https://saved.test/', title: 'Saved', pinned: true };
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: false }, sharedPinnedTabs: [oldPin] } });
+  await env.complete(env.message('getSettings'));
+  env.fail('windows.getAll');
+  const result = await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: true } }));
+  assert.match(result.error, /Injected/);
+  assert.equal(env.stored().settings.sharePinnedTabs, false);
+  assert.deepEqual(env.stored().sharedPinnedTabs, [oldPin]);
+});
+
+test('zero live windows preserves shared pins for recovery', async () => {
+  const pins = [{ url: 'https://saved.test/', title: 'Saved', pinned: true }];
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: true }, sharedPinnedTabs: pins }, windows: [] });
+  await env.complete(env.message('exportBackup'));
+  assert.deepEqual(env.stored().sharedPinnedTabs, pins);
+});
+
 test('shared pinned settings backup round trip keeps existing pin policy', async () => {
   const env = harness({ data: { workspaces: { a: saved('a'), b: saved('b') }, activeWorkspaceId: 'a',
-    settings: { sharePinnedTabs: true }, sharedPinnedTabs: [{ url: 'https://pin.test/', title: 'Pin', pinned: true }] } });
+    settings: { sharePinnedTabs: true }, sharedPinnedTabs: [{ url: 'https://pin.test/', title: 'Pin', pinned: true }] },
+    windows: [{ ...live(1), tabs: [{ id: 101, windowId: 1, url: 'https://pin.test/', title: 'Pin', pinned: true }, ...live(1).tabs] }] });
   const exported = await env.complete(env.message('exportBackup'));
   assert.equal((await env.complete(env.message('importBackup', { data: exported.data }))).success, true);
   assert.equal(env.stored().settings.sharePinnedTabs, true);
@@ -842,7 +1102,8 @@ test('nonactive deletion keeps active live windows and only removes owned window
 
 test('fresh creation with shared pins removes default blank tab as before', async () => {
   const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
-    settings: { sharePinnedTabs: true }, sharedPinnedTabs: [{ url: 'https://pin.test/', pinned: true }] } });
+    settings: { sharePinnedTabs: true }, sharedPinnedTabs: [{ url: 'https://pin.test/', pinned: true }] },
+    windows: [pinWindow(1, ['https://pin.test/'])] });
   assert.equal((await env.complete(env.message('createWorkspace', { name: 'Fresh' }))).success, true);
   assert.deepEqual([...env.open.values()][0].tabs.map(tab => tab.url), ['https://pin.test/']);
 });

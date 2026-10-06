@@ -584,28 +584,143 @@ async function exportBackup() {
   return { success: true, data: backupData };
 }
 
+function isPlainRecord(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return Object.prototype.toString.call(value) === '[object Object]' &&
+    (prototype === null || Object.getPrototypeOf(prototype) === null);
+}
+
+function isSafeBackupKey(value) {
+  return typeof value === 'string' && value.length > 0 &&
+    !['__proto__', 'prototype', 'constructor'].includes(value) && /^[a-zA-Z0-9_-]+$/.test(value);
+}
+
+function isSafeBackupName(value) {
+  return typeof value === 'string' && value.trim().length > 0 &&
+    !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function isSafeBackupUrl(value) {
+  if (typeof value !== 'string' || value.length === 0 || /[\u0000-\u001f\u007f]/.test(value)) return false;
+  if (/^data:/i.test(value)) return /^data:[^,]*,[\s\S]*$/i.test(value);
+  if (/^(?:chrome|edge|dia):\/\//i.test(value)) {
+    return /^(?:chrome:\/\/(?:newtab|new-tab-page)(?:[/?#].*)?|edge:\/\/newtab(?:[/?#].*)?|dia:\/\/new-tab-page(?:-third-party)?(?:[/?#].*)?)$/i.test(value);
+  }
+  if (/^about:/i.test(value)) return /^about:(?:blank|newtab)$/i.test(value);
+  if (/^(?:chrome-extension|moz-extension|safari-web-extension):\/\//i.test(value)) {
+    try {
+      const parsedExtensionUrl = new URL(value);
+      return parsedExtensionUrl.hostname.length > 0 && parsedExtensionUrl.pathname.length > 0;
+    } catch (error) {
+      return false;
+    }
+  }
+  try {
+    const parsed = new URL(value);
+    return ['http:', 'https:', 'file:', 'data:'].includes(parsed.protocol);
+  } catch (error) {
+    return false;
+  }
+}
+
+function normalizeBackupTab(tab) {
+  if (!isPlainRecord(tab) || !isSafeBackupUrl(tab.url) ||
+      (tab.title !== undefined && typeof tab.title !== 'string') ||
+      (tab.pinned !== undefined && typeof tab.pinned !== 'boolean')) return null;
+  return { url: tab.url, title: tab.title || '', pinned: tab.pinned === true };
+}
+
+function normalizeBackupWindow(window) {
+  if (!isPlainRecord(window) || !Array.isArray(window.tabs)) return null;
+  const tabs = window.tabs.map(normalizeBackupTab);
+  if (tabs.some(tab => !tab)) return null;
+  let state = { state: 'normal' };
+  if (window.windowState !== undefined) {
+    if (!isPlainRecord(window.windowState) || !['normal', 'minimized', 'maximized', 'fullscreen'].includes(window.windowState.state)) return null;
+    const { state: stateName, left, top, width, height } = window.windowState;
+    const geometry = [left, top, width, height];
+    const hasGeometry = geometry.some(value => value !== undefined);
+    if (stateName === 'normal' && hasGeometry &&
+        (geometry.some(value => typeof value !== 'number' || !Number.isFinite(value)) || width <= 0 || height <= 0)) return null;
+    if (stateName !== 'normal' && hasGeometry) return null;
+    state = { state: stateName };
+    if (stateName === 'normal' && hasGeometry) Object.assign(state, { left, top, width, height });
+  }
+  return { windowState: state, tabs };
+}
+
+function normalizeBackupWorkspace(id, workspace) {
+  if (!isSafeBackupKey(id) || !isPlainRecord(workspace) || workspace.id !== id ||
+      !isSafeBackupName(workspace.name) || typeof workspace.color !== 'string' || !/^#[0-9a-f]{6}$/i.test(workspace.color) ||
+      !Number.isFinite(workspace.createdAt) || workspace.createdAt < 0 ||
+      !Number.isFinite(workspace.lastAccessed) || workspace.lastAccessed < 0 ||
+      !Array.isArray(workspace.windows) ||
+      (workspace.windowIds !== undefined && (!Array.isArray(workspace.windowIds) ||
+        workspace.windowIds.some(windowId => !Number.isSafeInteger(windowId) || windowId < 0))) ||
+      (workspace.tabs !== undefined && !(Number.isSafeInteger(workspace.tabs) && workspace.tabs >= 0) && !Array.isArray(workspace.tabs))) return null;
+  const windows = workspace.windows.map(normalizeBackupWindow);
+  if (windows.some(window => !window)) return null;
+  const tabs = Array.isArray(workspace.tabs) ? workspace.tabs.map(normalizeBackupTab) : null;
+  if (tabs?.some(tab => !tab)) return null;
+  return {
+    id,
+    name: workspace.name.trim(),
+    color: workspace.color,
+    createdAt: workspace.createdAt,
+    lastAccessed: workspace.lastAccessed,
+    windowIds: [],
+    windows,
+    tabs: tabs || windows.reduce((total, window) => total + window.tabs.length, 0)
+  };
+}
+
+function normalizeBackupData(data) {
+  if (!isPlainRecord(data) || (data.version !== undefined && data.version !== '1.0.1') ||
+      !isPlainRecord(data.workspaces)) return null;
+  if (data.timestamp !== undefined && (!Number.isFinite(data.timestamp) || data.timestamp < 0)) return null;
+  if (data.activeWorkspaceId !== undefined && data.activeWorkspaceId !== null && !isSafeBackupKey(data.activeWorkspaceId)) return null;
+  if (data.settings !== undefined && (!isPlainRecord(data.settings) ||
+      (data.settings.sharePinnedTabs !== undefined && typeof data.settings.sharePinnedTabs !== 'boolean'))) return null;
+  if (data.sharedPinnedTabs !== undefined && !Array.isArray(data.sharedPinnedTabs)) return null;
+  const normalizedWorkspaces = {};
+  for (const [id, workspace] of Object.entries(data.workspaces)) {
+    const normalized = normalizeBackupWorkspace(id, workspace);
+    if (!normalized) return null;
+    normalizedWorkspaces[id] = normalized;
+  }
+  const pins = (data.sharedPinnedTabs || []).map(normalizeBackupTab);
+  if (pins.some(tab => !tab)) return null;
+  return {
+    workspaces: normalizedWorkspaces,
+    activeWorkspaceId: data.activeWorkspaceId || null,
+    settings: { sharePinnedTabs: data.settings?.sharePinnedTabs === true },
+    sharedPinnedTabs: pins.map(tab => ({ ...tab, pinned: true }))
+  };
+}
+
 // Import backup
 async function importBackup(data) {
-  if (!data || !data.workspaces) throw new Error('Invalid backup data');
+  const normalized = normalizeBackupData(data);
+  if (!normalized) throw new Error('Invalid backup data');
   return withTransition(async () => {
     await saveAllWorkspaceWindows();
     const previousState = copyState();
     const sourceWindows = await chrome.windows.getAll();
-    settings = data.settings || { sharePinnedTabs: false };
-    sharedPinnedTabs = data.sharedPinnedTabs || [];
-    workspaces = {};
-    for (const [id, workspace] of Object.entries(data.workspaces)) {
-      const restored = JSON.parse(JSON.stringify(workspace));
-      restored.windowIds = [];
-      delete restored.windowId;
-      if (settings.sharePinnedTabs && restored.windows) {
-        restored.windows = restored.windows.map(window => ({ ...window, tabs: window.tabs.filter(tab => !tab.pinned) }));
+    settings = normalized.settings;
+    sharedPinnedTabs = normalized.sharedPinnedTabs;
+    workspaces = normalized.workspaces;
+    if (settings.sharePinnedTabs) {
+      for (const workspace of Object.values(workspaces)) {
+        workspace.windows = workspace.windows.map(window => ({
+          ...window,
+          tabs: window.tabs.filter(tab => !tab.pinned)
+        }));
       }
-      workspaces[id] = restored;
     }
     activeWorkspaceId = null;
     const workspaceArray = Object.values(workspaces);
-    const target = workspaces[data.activeWorkspaceId] || workspaceArray
+    const target = workspaces[normalized.activeWorkspaceId] || workspaceArray
       .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
     if (target) {
       await replaceWorkspaceWindows(target.id, sourceWindows, previousState);
@@ -616,48 +731,79 @@ async function importBackup(data) {
   });
 }
 
-// Update settings
-async function updateSettings(newSettings) {
-  settings = { ...settings, ...newSettings };
-  
-  // If switching to shared pinned tabs mode, extract pinned tabs from active workspace
-  if (settings.sharePinnedTabs && activeWorkspaceId && workspaces[activeWorkspaceId]) {
-    try {
-      const workspace = workspaces[activeWorkspaceId];
-      // Get pinned tabs from all windows in the workspace
-      const allPinnedTabs = [];
-      if (workspace.windowIds && workspace.windowIds.length > 0) {
-        for (const windowId of workspace.windowIds) {
-          try {
-            const window = await chrome.windows.get(windowId, { populate: true });
-            const pinnedTabs = window.tabs.filter(tab => tab.pinned).map(tab => ({
-              url: tab.url,
-              title: tab.title,
-              pinned: true
-            }));
-            allPinnedTabs.push(...pinnedTabs);
-          } catch (e) {
-            // Window may be closed
-          }
-        }
+function collectSharedPinnedTabs(windows) {
+  const pins = [];
+  const maximumCounts = new Map();
+  for (const window of windows) {
+    const counts = new Map();
+    for (const tab of window.tabs) {
+      if (!tab.pinned || typeof tab.url !== 'string' || !tab.url || isBlankTab(tab.url)) continue;
+      const count = (counts.get(tab.url) || 0) + 1;
+      counts.set(tab.url, count);
+      if (count > (maximumCounts.get(tab.url) || 0)) {
+        pins.push({ url: tab.url, title: tab.title, pinned: true });
+        maximumCounts.set(tab.url, count);
       }
-      
-      // Extract pinned tabs to shared
-      sharedPinnedTabs = allPinnedTabs;
-      
-      // Remove pinned tabs from all workspaces
-      for (const ws of Object.values(workspaces)) {
-        if (ws.windows) {
-          for (const windowData of ws.windows) {
-            windowData.tabs = windowData.tabs.filter(tab => !tab.pinned);
-          }
-        }
-      }
-    } catch (e) {
-      // Continue even if window not found
     }
   }
-  
+  return pins;
+}
+
+// Update settings
+async function updateSettings(newSettings) {
+  const wasSharing = settings.sharePinnedTabs;
+  settings = { ...settings, ...newSettings };
+
+  if (wasSharing && !settings.sharePinnedTabs) {
+    // Snapshot while shared mode is still active so the pending tab state and
+    // current pin set are captured together, even before the normal save debounce.
+    if (activeWorkspaceId && workspaces[activeWorkspaceId]) await saveAllWorkspaceWindows();
+    const liveWindows = activeWorkspaceId && workspaces[activeWorkspaceId]
+      ? (await chrome.windows.getAll({ populate: true }))
+          .filter(window => !excludedWindowIds.has(window.id) && (workspaces[activeWorkspaceId].windowIds.includes(window.id) ||
+            !Object.entries(workspaces).some(([id, ws]) => id !== activeWorkspaceId && ws.windowIds?.includes(window.id))))
+      : [];
+    const pinsToPreserve = (liveWindows.length > 0 ? collectSharedPinnedTabs(liveWindows) : sharedPinnedTabs)
+      .map(tab => ({ ...tab, pinned: true }));
+    for (const workspace of Object.values(workspaces)) {
+      workspace.windows = (workspace.windows || []).map(window => ({
+        ...window,
+        tabs: [...pinsToPreserve.map(tab => ({ ...tab })), ...window.tabs.filter(tab => !tab.pinned)]
+      }));
+      if (workspace.windows.length === 0) {
+        workspace.windows = [{
+          windowState: { state: 'maximized' },
+          tabs: pinsToPreserve.map(tab => ({ ...tab }))
+        }];
+      }
+      workspace.tabs = workspace.windows.reduce((total, window) => total + window.tabs.length, 0);
+    }
+    sharedPinnedTabs = [];
+    await saveState();
+    return { success: true };
+  }
+
+  // If switching to shared pinned tabs mode, extract pinned tabs from active workspace
+  if (settings.sharePinnedTabs && activeWorkspaceId && workspaces[activeWorkspaceId]) {
+    const workspace = workspaces[activeWorkspaceId];
+    const windows = (await chrome.windows.getAll({ populate: true }))
+      .filter(window => !excludedWindowIds.has(window.id) && (workspace.windowIds.includes(window.id) ||
+        !Object.entries(workspaces).some(([id, ws]) => id !== activeWorkspaceId && ws.windowIds?.includes(window.id))));
+    if (windows.length > 0) sharedPinnedTabs = collectSharedPinnedTabs(windows);
+    for (const ws of Object.values(workspaces)) {
+      if (ws.windows) {
+        for (const windowData of ws.windows) {
+          windowData.tabs = windowData.tabs.filter(tab => !tab.pinned);
+        }
+        ws.tabs = ws.windows.reduce((total, window) => total + window.tabs.length, 0);
+      }
+    }
+  }
+  if (wasSharing && !settings.sharePinnedTabs && activeWorkspaceId && workspaces[activeWorkspaceId]) {
+    await saveAllWorkspaceWindows();
+    return { success: true };
+  }
+
   await saveState();
   return { success: true };
 }
@@ -685,6 +831,8 @@ async function saveAllWorkspaceWindows() {
     return;
   }
 
+  if (settings.sharePinnedTabs) sharedPinnedTabs = collectSharedPinnedTabs(allWindows);
+
   console.log('saveAllWorkspaceWindows: Found', allWindows.length, 'windows');
   
   // Save data for all current windows
@@ -706,18 +854,6 @@ async function saveAllWorkspaceWindows() {
     // Get tabs from this window
     let windowTabs;
     if (settings.sharePinnedTabs) {
-      // In shared mode, save shared pinned tabs separately (exclude blank tabs)
-      const pinnedTabs = window.tabs
-        .filter(tab => tab.pinned && typeof tab.url === 'string' && tab.url.length > 0 && !isBlankTab(tab.url))
-        .map(tab => ({
-          url: tab.url,
-          title: tab.title,
-          pinned: true
-        }));
-      if (pinnedTabs.length > 0) {
-        sharedPinnedTabs = pinnedTabs;
-      }
-      
       // Only save unpinned tabs to workspace (exclude blank tabs)
       windowTabs = window.tabs
         .filter(tab => !tab.pinned && typeof tab.url === 'string' && tab.url.length > 0 && !isBlankTab(tab.url))
