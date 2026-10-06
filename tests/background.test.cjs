@@ -1073,6 +1073,36 @@ test('failed shared-pin collection keeps old settings and pins', async () => {
   assert.deepEqual(env.stored().sharedPinnedTabs, [oldPin]);
 });
 
+test('enabling shared pins without live windows extracts pins from saved active snapshot', async () => {
+  const savedWindow = tabs => ({ windowState: { state: 'normal' }, tabs });
+  const env = harness({ data: { workspaces: {
+    a: saved('a', undefined, { windows: [savedWindow([
+      { url: 'https://saved-one.test/', title: 'One', pinned: true },
+      { url: 'https://saved-one.test/', title: 'One', pinned: true },
+      { url: 'https://saved-two.test/', title: 'Two', pinned: true },
+      { url: 'https://content.test/', title: 'Content', pinned: false }
+    ])] }),
+    b: saved('b', undefined, { windows: [savedWindow([
+      { url: 'https://inactive-pin.test/', title: 'Inactive', pinned: true },
+      { url: 'https://inactive-content.test/', title: 'Inactive content', pinned: false }
+    ])] })
+  }, activeWorkspaceId: 'a', settings: { sharePinnedTabs: false } }, windows: [] });
+  assert.equal((await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: true } }))).success, true);
+  assert.deepEqual(env.stored().sharedPinnedTabs.map(tab => tab.url),
+    ['https://saved-one.test/', 'https://saved-one.test/', 'https://saved-two.test/']);
+  assert.deepEqual(env.stored().workspaces.a.windows[0].tabs.map(tab => tab.url), ['https://content.test/']);
+  assert.deepEqual(env.stored().workspaces.b.windows[0].tabs.map(tab => tab.url), ['https://inactive-content.test/']);
+  assert.equal(env.stored().workspaces.a.tabs, 1);
+});
+
+test('enabling shared pins without live windows or saved pins keeps existing shared list', async () => {
+  const existing = [{ url: 'https://existing.test/', title: 'Existing', pinned: true }];
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: false }, sharedPinnedTabs: existing }, windows: [] });
+  assert.equal((await env.complete(env.message('updateSettings', { settings: { sharePinnedTabs: true } }))).success, true);
+  assert.deepEqual(env.stored().sharedPinnedTabs, existing);
+});
+
 test('zero live windows preserves shared pins for recovery', async () => {
   const pins = [{ url: 'https://saved.test/', title: 'Saved', pinned: true }];
   const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',

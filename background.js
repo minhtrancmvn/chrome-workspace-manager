@@ -789,7 +789,10 @@ async function updateSettings(newSettings) {
     const windows = (await chrome.windows.getAll({ populate: true }))
       .filter(window => !excludedWindowIds.has(window.id) && (workspace.windowIds.includes(window.id) ||
         !Object.entries(workspaces).some(([id, ws]) => id !== activeWorkspaceId && ws.windowIds?.includes(window.id))));
-    if (windows.length > 0) sharedPinnedTabs = collectSharedPinnedTabs(windows);
+    // Without eligible live windows, fall back to the saved active snapshot so
+    // stripping saved pins below cannot silently discard them.
+    const collected = collectSharedPinnedTabs(windows.length > 0 ? windows : workspace.windows || []);
+    if (windows.length > 0 || collected.length > 0) sharedPinnedTabs = collected;
     for (const ws of Object.values(workspaces)) {
       if (ws.windows) {
         for (const windowData of ws.windows) {

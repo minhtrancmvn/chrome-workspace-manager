@@ -68,7 +68,7 @@ Four primary local keys: `workspaces`, `activeWorkspaceId`, `sharedPinnedTabs`, 
 
 `settings.sharePinnedTabs` defaults false. Shared restore prepends global pins to each restored window. Collection uses exact URL and maximum per-window occurrence count, preserving intentional duplicates within a window without multiplying restored replicas. An empty live pin set clears shared pins; no live windows preserves recovery data.
 
-Disabling sharing materializes pins into saved workspace windows, including inactive and empty-window snapshots. Enabling collects eligible live pins, then strips saved workspace pins. Known limitation: enabling with no eligible live windows currently does not extract saved pins before stripping them; add regression and fix before claiming that path is safe. Shared mode does not immediately synchronize live pin edits between windows.
+Disabling sharing materializes pins into saved workspace windows, including inactive and empty-window snapshots. Enabling collects eligible live pins, falling back to the saved active snapshot when no eligible live window exists, then strips saved workspace pins. Pins saved only in inactive workspaces are not extracted when enabling. Shared mode does not immediately synchronize live pin edits between windows.
 
 Export snapshots active state and returns a `1.0.1` envelope containing workspace state, settings, and pins, not internal recovery/session metadata. It currently calls two full-snapshot wrappers. Import validates and normalizes before snapshot/storage/window effects, supports versionless or `1.0.1` data, resets imported live IDs, and restores backed-up active or most recently accessed workspace. Valid empty backups remain supported. Popup uses `Blob` download and `FileReader` upload.
 
