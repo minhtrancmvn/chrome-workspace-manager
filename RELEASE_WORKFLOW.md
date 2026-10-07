@@ -33,11 +33,16 @@ Edit `manifest.json` and bump the version:
 ./package-extension.sh
 ```
 
-The script will:
-1. Create `releases/` folder if it doesn't exist
-2. Read version from `manifest.json`
-3. Create `releases/workspace-manager-vX.Y.Z.zip`
-4. Prompt for changelog entry (optional)
+Run packaging only when a release archive is explicitly requested. Development, commits, merges, pushes, and store uploads are separate actions.
+
+Requires Bash, Node.js, and `zip`. The script resolves files relative to its own directory and will:
+1. Validate required runtime files and parse version from `manifest.json`
+2. Create `releases/` if needed
+3. Build a fresh temporary ZIP containing only the runtime allowlist
+4. Replace `releases/workspace-manager-vX.Y.Z.zip` only after ZIP creation succeeds; validation/ZIP failures preserve an existing same-version archive
+5. Prompt for an optional changelog entry; EOF skips the prompt
+
+Missing runtime files and symlinked runtime/output paths fail with nonzero exit status. Temporary archive files are cleaned on exit.
 
 ### 3. Add Changelog Entry
 
@@ -119,14 +124,34 @@ If you skipped the changelog prompt, you can manually edit `releases/CHANGELOG.m
 
 Add your entry after the file header and before previous versions.
 
-## Excluded Files
+## Runtime Allowlist
 
-The packaging script automatically excludes:
-- `.git/` and `.github/` folders
-- `.DS_Store` files
-- Development scripts (`*.sh`)
-- Documentation files (`DISTRIBUTION.md`, `SETUP.md`)
-- Previous releases (`releases/` folder)
+The Chromium ZIP contains only:
+
+```text
+manifest.json
+background.js
+browser-api.js
+popup.html
+popup.js
+popup.css
+recovery.html
+icons/icon16.png
+icons/icon48.png
+icons/icon128.png
+```
+
+Everything else stays out, including tests, guidance, planning files, scripts, local agent settings, extra icon files, and prior releases. Add new runtime files explicitly to the allowlist when extension references change. Inspect archive before distribution:
+
+```bash
+unzip -Z1 releases/workspace-manager-vX.Y.Z.zip
+```
+
+Firefox uses its separate runtime staging script and alternate manifest; this ZIP script packages the root Chromium manifest, not a signed Firefox add-on. See `BROWSER_SUPPORT.md`. Packaging regression tests create disposable fixture archives, not repository releases:
+
+```bash
+node --test tests/package-extension.test.cjs
+```
 
 ## Tips
 
@@ -176,8 +201,8 @@ vim manifest.json  # Change to 2.2.0
 ls -l releases/workspace-manager-v2.2.0.zip
 cat releases/CHANGELOG.md
 
-# 6. Test installation
-# Load the new zip in Chrome extensions
+# 6. Test installation in a disposable Chrome profile
+# Extract the ZIP, then load its directory unpacked in chrome://extensions/
 
 # 7. Distribute
 # Share or upload to Chrome Web Store

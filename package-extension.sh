@@ -1,39 +1,50 @@
 #!/bin/bash
 
 # Package Workspace Manager Extension
-# This creates a clean ZIP file ready for distribution
+# Include only runtime files; preserve previous package if validation or ZIP fails.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+RUNTIME_FILES=(
+  manifest.json background.js browser-api.js popup.html popup.js popup.css
+  recovery.html icons/icon16.png icons/icon48.png icons/icon128.png
+)
 
 echo "📦 Packaging Workspace Manager Extension..."
 echo ""
 
-# Get version from manifest
-VERSION=$(grep '"version"' manifest.json | sed 's/.*"version": "\(.*\)".*/\1/')
-
-# Create releases directory if it doesn't exist
-if [ ! -d "releases" ]; then
-  mkdir releases
-  echo "📁 Created releases directory"
+for FILE in "${RUNTIME_FILES[@]}"; do
+  if [ ! -f "$FILE" ] || [ -L "$FILE" ]; then
+    printf 'Required runtime file missing or symlinked: %s\n' "$FILE" >&2
+    exit 1
+  fi
+done
+if [ -L icons ] || [ -L releases ]; then
+  printf 'Runtime/output directories must not be symlinks.\n' >&2
+  exit 1
 fi
 
+VERSION=$(node -e '
+  const fs = require("node:fs");
+  const version = JSON.parse(fs.readFileSync("manifest.json", "utf8")).version;
+  if (typeof version !== "string" || !/^\d+(\.\d+){0,3}$/.test(version)) {
+    throw new Error("Invalid manifest version");
+  }
+  process.stdout.write(version);
+')
+
+mkdir -p releases
 OUTPUT="releases/workspace-manager-v${VERSION}.zip"
-
-# Remove old package if exists
-if [ -f "$OUTPUT" ]; then
-  rm "$OUTPUT"
-  echo "🗑️  Removed old package"
+if [ -L "$OUTPUT" ] || { [ -e "$OUTPUT" ] && [ ! -f "$OUTPUT" ]; }; then
+  printf 'Release output must be a regular file: %s\n' "$OUTPUT" >&2
+  exit 1
 fi
 
-# Create zip excluding development files and releases folder
-zip -r "$OUTPUT" . \
-  -x "*.git*" \
-  -x "*.DS_Store" \
-  -x "*package-extension.sh" \
-  -x "*DISTRIBUTION.md" \
-  -x "*SETUP.md" \
-  -x "*.md.backup*" \
-  -x "*convert-icons.sh" \
-  -x "*releases/*" \
-  -x "*.github/*"
+TEMP_DIR=$(mktemp -d releases/.package-XXXXXXXX)
+trap 'rm -rf "$TEMP_DIR"' EXIT
+zip -q "$TEMP_DIR/package.zip" "${RUNTIME_FILES[@]}"
+mv -f "$TEMP_DIR/package.zip" "$OUTPUT"
 
 echo ""
 echo "✅ Extension packaged successfully!"
@@ -43,7 +54,8 @@ echo ""
 
 # Prompt for changelog entry
 echo "📝 Would you like to add a changelog entry for this release? (y/n)"
-read -r ADD_CHANGELOG
+ADD_CHANGELOG='n'
+read -r ADD_CHANGELOG || ADD_CHANGELOG='n'
 
 if [ "$ADD_CHANGELOG" = "y" ] || [ "$ADD_CHANGELOG" = "Y" ]; then
   echo ""

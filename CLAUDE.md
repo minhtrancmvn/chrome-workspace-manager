@@ -18,13 +18,13 @@ Run from repository root:
 
 | Command | Purpose |
 |---------|---------|
-| `node --test tests/background.test.cjs tests/browser-api.test.cjs tests/popup.test.cjs` | Full dependency-free regression suite using Node's built-in test runner. |
+| `node --test tests/background.test.cjs tests/browser-api.test.cjs tests/popup.test.cjs tests/package-extension.test.cjs` | Full dependency-free regression suite using Node's built-in test runner. |
 | `node --test --test-name-pattern='shared pins' tests/background.test.cjs` | Focused tests; confirm matching test names ran, not an empty selection. |
 | `node --check background.js` | Background syntax check; does not verify browser behavior. |
 | `node --check popup.js` | Popup syntax check. |
 | `git diff --check` | Changed-line whitespace check. |
 | `node scripts/prepare-browser.cjs firefox /tmp/workspace-manager-firefox` | Stage Firefox runtime files with alternate manifest; destination must be outside repository and absent or empty. No ZIP, signing, or upload. |
-| `./package-extension.sh` | Release-only ZIP creation under `releases/`; optionally prompts for changelog input and replaces existing same-version ZIP. |
+| `./package-extension.sh` | Release-only runtime-allowlist ZIP creation under `releases/`; requires Bash, Node.js and `zip`, optionally prompts for changelog input, preserves existing archive on validation/ZIP failure. |
 | `./convert-icons.sh` | Regenerate PNG icons with ImageMagick; may attempt Homebrew installation if missing. |
 
 No npm installation, build target, configured formatter/linter, or CI workflow is required to run the existing tests. Tests use isolated Chrome API mocks; they do not access browser profiles. See `tests/README.md`.
@@ -86,7 +86,7 @@ Exercise distinct multi-window URLs, pins, blank tabs, normal/maximized/fullscre
 - Firefox lacks `windows.onBoundsChanged`; optional registration keeps tabs working, but resize-only persistence is not immediate. `restorableUrl()` maps blank URLs to legal `about:blank` on Firefox.
 - `isBlankTab()` filters browser blank-page prefixes; blank-only windows use fallback, blank tabs alongside real tabs are generally filtered.
 - `README.md`, `SETUP.md`, and older Git/release instructions can be stale. Current source and development/publish separation take precedence.
-- Packaging uses recursive exclusions, not runtime allowlist; tests, guidance, planning files, or local agent files can enter ZIP. Inspect archive before distribution. Firefox stager uses runtime allowlist and refuses nonempty destinations.
+- Chromium packaging uses an explicit runtime-file allowlist; update it when adding runtime references. Missing files or symlinked runtime/output paths fail; ZIP builds replace existing archive only after success. Packaging tests require `zip` and `unzip` and create disposable fixture archives only. Inspect archive before distribution. Firefox stager uses its separate runtime allowlist and refuses nonempty destinations.
 
 ## Development Workflow
 

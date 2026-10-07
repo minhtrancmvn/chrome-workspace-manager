@@ -3,10 +3,10 @@
 Run from repository root:
 
 ```sh
-node --test tests/background.test.cjs tests/browser-api.test.cjs tests/popup.test.cjs
+node --test tests/background.test.cjs tests/browser-api.test.cjs tests/popup.test.cjs tests/package-extension.test.cjs
 ```
 
-Requires Node.js with built-in `node:test`. No package installation, bundler or production dependency.
+Requires Node.js with built-in `node:test`. Packaging tests also require Bash, `zip`, and `unzip`; they run a copied packaging script in disposable fixtures and remove those fixture archives afterward. Repository release ZIPs and changelog are untouched. No package installation, bundler or production dependency.
 
 Background tests execute actual background.js in isolated VM with mocked Chrome APIs. Fixtures control storage initialization, timers, delayed browser events, concurrent requests and rejected API/storage calls. Popup tests execute actual popup.js with minimal DOM and messaging mocks, covering dynamic values kept out of HTML markup, native switch button wiring, transport/background errors, and checkbox rollback. These mocks do not parse HTML or simulate native keyboard behavior; use a disposable browser to verify rendered DOM, focus, and Enter/Space activation. No real browser windows or user data touched by the unit suite.
 
