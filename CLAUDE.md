@@ -53,7 +53,7 @@ Four primary local keys: `workspaces`, `activeWorkspaceId`, `sharedPinnedTabs`, 
 - Tab records contain `url`, `title`, and `pinned`. Workspace-level `tabs` is usually a count, but validated arrays remain supported; restorable data belongs in `windows[].tabs`.
 - Initialization shares one readiness promise and migrates legacy `windowId` to `windowIds` where needed. Window removal drops live IDs but retains saved snapshots.
 - Transition intent is persisted before preparing replacement windows. Initial `recovery.html` marker URLs identify operation and window slot through the creation/ID-checkpoint gap. Target ownership and committed journal phase persist together before source cleanup.
-- Recovery rolls back preparation or finishes committed cleanup. Cross-session recovery must not use old numeric IDs to close current windows. Browser API side effects and storage writes are not one atomic transaction; do not claim universal crash safety.
+- Recovery rolls back preparation or finishes committed cleanup. Inactive deletion writes removed workspace state, committed `inactiveDeletion` journal, and startup supersession together before closing exclusively owned windows; replay preserves windows also owned by another workspace. Cross-session recovery must not use old numeric IDs to close current windows. Cleanup/API/storage failures after commit can report an error while deletion is durable and cleanup remains pending. Browser API side effects and storage writes are not one atomic transaction; do not claim universal crash safety.
 
 ### Snapshots and restoration
 
@@ -82,7 +82,7 @@ Run full regression suite and syntax checks after edits. Use disposable browser 
 
 Exercise distinct multi-window URLs, pins, blank tabs, normal/maximized/fullscreen state, bounds, manual closure, worker stop/wake, full restart, storage/API rejection, rename/color/badge, settings toggles, and backup round trips. Inspect popup and background errors. Mocks cannot prove termination timing, physical display behavior, or Dia support.
 
-- Abrupt termination inside 500 ms debounce can lose latest unsaved edit. Inactive-workspace deletion is not fully journaled.
+- Abrupt termination inside 500 ms debounce can lose latest unsaved edit. Journaled deletion cleanup requires a successful initialization/recovery or later state operation to retry; there is no durable background retry scheduler.
 - Firefox lacks `windows.onBoundsChanged`; optional registration keeps tabs working, but resize-only persistence is not immediate. `restorableUrl()` maps blank URLs to legal `about:blank` on Firefox.
 - `isBlankTab()` filters browser blank-page prefixes; blank-only windows use fallback, blank tabs alongside real tabs are generally filtered.
 - `README.md`, `SETUP.md`, and older Git/release instructions can be stale. Current source and development/publish separation take precedence.

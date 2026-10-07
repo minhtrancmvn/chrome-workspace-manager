@@ -85,6 +85,7 @@ async function recoverTransition() {
     if (sameSession) {
       const sourceIds = new Set(journal.sourceIds || []);
       for (const id of sourceIds) {
+        excludedWindowIds.add(id);
         try { await chrome.windows.remove(id); } catch (error) {
           if (!/No window|not found/i.test(error.message)) throw error;
         }
@@ -101,7 +102,8 @@ async function recoverTransition() {
       else for (const workspace of Object.values(committedState.workspaces)) {
         workspace.windowIds = workspace.windowIds.filter(id => !(journal.sourceIds || []).includes(id));
       }
-      const startup = { sessionId: recoverySessionId, state: committedState };
+      const startup = { sessionId: recoverySessionId,
+        state: journal.kind === 'inactiveDeletion' && sameSession ? null : committedState };
       await chrome.storage.local.set({ ...committedState, workspaceStartup: startup });
       recoveryMetadata = startup;
       applyState(committedState);
@@ -502,9 +504,23 @@ async function deleteWorkspace(workspaceId) {
       }
     } else {
       const liveWindows = await chrome.windows.getAll();
-      for (const window of liveWindows) {
-        if (workspace.windowIds.includes(window.id)) await chrome.windows.remove(window.id);
-      }
+      const sourceIds = liveWindows.filter(window => workspace.windowIds.includes(window.id) &&
+        !Object.entries(workspaces).some(([id, ws]) => id !== workspaceId && ws.windowIds?.includes(window.id)))
+        .map(window => window.id);
+      const committedState = copyState();
+      delete committedState.workspaces[workspaceId];
+      const journal = { operationId: crypto.randomUUID(), sessionId: recoverySessionId,
+        kind: 'inactiveDeletion', phase: 'committed', sourceIds, committedState };
+      const startup = { sessionId: recoverySessionId, state: null };
+      await chrome.storage.local.set({ ...committedState, [recoveryKey]: journal, workspaceStartup: startup });
+      recoveryJournal = journal;
+      recoveryMetadata = startup;
+      startupState = null;
+      applyState(committedState);
+      durableState = copyState();
+      updateBadge();
+      await recoverTransition();
+      return { success: true };
     }
     delete workspaces[workspaceId];
     await saveState();

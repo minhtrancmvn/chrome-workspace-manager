@@ -1121,6 +1121,172 @@ test('shared pinned settings backup round trip keeps existing pin policy', async
   assert.deepEqual([...env.open.values()][0].tabs.map(tab => tab.url), ['https://pin.test/', 'https://live.test/']);
 });
 
+function inactiveDeletionHarness() {
+  return harness({ data: { workspaces: { a: saved('a'),
+    b: saved('b', undefined, { windowIds: [2, 3] }) }, activeWorkspaceId: 'a' },
+    windows: [live(), live(2), live(3), live(4)] });
+}
+
+test('inactive deletion commits cleanup intent before first window close', async () => {
+  const env = inactiveDeletionHarness();
+  env.hold('windows.remove');
+  env.message('deleteWorkspace', { workspaceId: 'b' });
+  await pump();
+  assert.equal(env.stored().workspaces.b, undefined);
+  assert.equal(env.local().workspaceRecovery?.phase, 'committed');
+  assert.deepEqual(env.local().workspaceRecovery.sourceIds, [2, 3]);
+  assert.equal(env.local().workspaceStartup.state, null);
+  env.crash();
+  const restarted = harness({ windows: [...env.open.values()], shared: env.shared });
+  const result = await restarted.complete(restarted.message('getWorkspaces'));
+  assert.equal(result.activeWorkspaceId, 'a');
+  assert.equal(result.workspaces.b, undefined);
+  assert.deepEqual([...restarted.open.keys()], [1, 4]);
+  assert.equal(restarted.local().workspaceRecovery, undefined);
+});
+
+test('inactive deletion resumes after one removal completed before worker death', async () => {
+  const env = inactiveDeletionHarness();
+  env.holdAfter('windows.remove');
+  env.message('deleteWorkspace', { workspaceId: 'b' });
+  await pump();
+  assert.equal(env.open.has(2), false);
+  env.crash();
+  const restarted = harness({ windows: [...env.open.values()], shared: env.shared });
+  const result = await restarted.complete(restarted.message('getWorkspaces'));
+  assert.equal(result.workspaces.b, undefined);
+  assert.deepEqual([...restarted.open.keys()], [1, 4]);
+});
+
+test('inactive deletion recovers commit completed before its storage response', async () => {
+  const env = inactiveDeletionHarness();
+  await env.complete(env.message('getWorkspaces'));
+  env.holdAfter('storage.set');
+  env.message('deleteWorkspace', { workspaceId: 'b' });
+  await pump();
+  assert.equal(env.stored().workspaces.b, undefined);
+  assert.deepEqual([...env.open.keys()], [1, 2, 3, 4]);
+  env.crash();
+  const restarted = harness({ windows: [...env.open.values()], shared: env.shared });
+  await restarted.complete(restarted.message('getWorkspaces'));
+  assert.deepEqual([...restarted.open.keys()], [1, 4]);
+  assert.equal(restarted.local().workspaceStartup.state, null);
+});
+
+test('inactive deletion recovery retains journal when cleanup repeatedly rejects', async () => {
+  const env = inactiveDeletionHarness();
+  env.fail('windows.remove');
+  await env.complete(env.message('deleteWorkspace', { workspaceId: 'b' }));
+  const restarted = harness({ windows: [...env.open.values()], shared: env.shared });
+  restarted.fail('windows.remove');
+  const result = await restarted.complete(restarted.message('getWorkspaces'));
+  assert.match(result.error, /Injected/);
+  assert.equal(restarted.local().workspaceRecovery.phase, 'committed');
+  assert.equal(restarted.stored().workspaces.b, undefined);
+  assert.deepEqual([...restarted.open.keys()], [1, 2, 3, 4]);
+  await restarted.complete(restarted.message('getWorkspaces'));
+  assert.deepEqual([...restarted.open.keys()], [1, 4]);
+});
+
+test('inactive deletion closing events cannot overwrite active snapshot or adopt sources', async () => {
+  const env = inactiveDeletionHarness();
+  assert.equal((await env.complete(env.message('deleteWorkspace', { workspaceId: 'b' }))).success, true);
+  await env.deliverEvents();
+  await env.idle();
+  assert.equal(env.stored().workspaces.b, undefined);
+  assert.deepEqual(env.stored().workspaces.a.windowIds, [1]);
+  assert.deepEqual(urls(env.stored().workspaces.a), ['https://a.test/']);
+});
+
+test('inactive deletion commit rejection leaves all windows and workspace intact', async () => {
+  const env = inactiveDeletionHarness();
+  await env.complete(env.message('getWorkspaces'));
+  env.fail('storage.set');
+  const result = await env.complete(env.message('deleteWorkspace', { workspaceId: 'b' }));
+  assert.match(result.error, /Injected storage.set failure/);
+  assert.deepEqual([...env.open.keys()], [1, 2, 3, 4]);
+  assert.ok(env.stored().workspaces.b);
+  assert.equal(env.local().workspaceRecovery, undefined);
+});
+
+test('inactive deletion API failure retains committed journal for retry', async () => {
+  const env = inactiveDeletionHarness();
+  env.fail('windows.remove', 2);
+  const result = await env.complete(env.message('deleteWorkspace', { workspaceId: 'b' }));
+  assert.match(result.error, /Injected windows.remove failure/);
+  assert.equal(env.stored().workspaces.b, undefined);
+  assert.equal(env.local().workspaceRecovery.phase, 'committed');
+  assert.equal(env.state('isSwitchingWorkspace'), false);
+  await env.complete(env.message('getWorkspaces'));
+  assert.deepEqual([...env.open.keys()], [1, 4]);
+  assert.equal(env.local().workspaceRecovery, undefined);
+});
+
+test('inactive deletion recovery never closes reused IDs in a new browser session', async () => {
+  const env = inactiveDeletionHarness();
+  env.hold('windows.remove');
+  env.message('deleteWorkspace', { workspaceId: 'b' });
+  await pump();
+  env.crash();
+  const restarted = harness({ windows: [live(2, ['https://unrelated.test/'])], shared: {
+    stored: env.shared.stored, local: env.shared.local, sessionStored: {}
+  } });
+  const result = await restarted.complete(restarted.message('getWorkspaces'));
+  assert.equal(result.workspaces.b, undefined);
+  assert.deepEqual(result.workspaces.a.windowIds, []);
+  assert.deepEqual([...restarted.open.keys()], [2]);
+  assert.equal(restarted.count('windows.remove'), 0);
+});
+
+test('inactive deletion respects overlapping ownership of other workspaces', async () => {
+  const env = harness({ data: { workspaces: { a: saved('a'),
+    b: saved('b', undefined, { windowIds: [1, 2, 3] }),
+    c: saved('c', undefined, { windowIds: [3] }) }, activeWorkspaceId: 'a' },
+    windows: [live(), live(2), live(3), live(4)] });
+  assert.equal((await env.complete(env.message('deleteWorkspace', { workspaceId: 'b' }))).success, true);
+  assert.deepEqual([...env.open.keys()], [1, 3, 4]);
+  assert.deepEqual(env.stored().workspaces.a.windowIds, [1]);
+  assert.deepEqual(env.stored().workspaces.c.windowIds, [3]);
+});
+
+test('inactive deletion recovery state-write failure retains cleanup intent', async () => {
+  const env = inactiveDeletionHarness();
+  await env.complete(env.message('getWorkspaces'));
+  env.fail('storage.set', 2);
+  const result = await env.complete(env.message('deleteWorkspace', { workspaceId: 'b' }));
+  assert.match(result.error, /Injected storage.set failure/);
+  assert.equal(env.stored().workspaces.b, undefined);
+  assert.equal(env.local().workspaceRecovery.phase, 'committed');
+  assert.deepEqual([...env.open.keys()], [1, 4]);
+  await env.complete(env.message('getWorkspaces'));
+  assert.equal(env.local().workspaceRecovery, undefined);
+  assert.equal(env.stored().workspaces.b, undefined);
+});
+
+test('inactive deletion with no owned windows preserves active snapshot on same-session startup event', async () => {
+  const env = harness();
+  assert.equal((await env.complete(env.message('deleteWorkspace', { workspaceId: 'b' }))).success, true);
+  assert.equal(env.count('windows.remove'), 0);
+  assert.equal(env.count('windows.create'), 0);
+  assert.equal(env.local().workspaceRecovery, undefined);
+  const restarted = harness({ windows: [...env.open.values()], shared: env.shared });
+  await restarted.complete(restarted.chrome.runtime.onStartup.emit()[0]);
+  assert.equal(restarted.stored().workspaces.b, undefined);
+  assert.equal(restarted.count('windows.create'), 0);
+  assert.deepEqual(urls(restarted.stored().workspaces.a), ['https://a.test/']);
+});
+
+test('inactive deletion journal-clear failure stays replayable', async () => {
+  const env = inactiveDeletionHarness();
+  env.fail('storage.remove');
+  const result = await env.complete(env.message('deleteWorkspace', { workspaceId: 'b' }));
+  assert.match(result.error || '', /Injected storage.remove failure/);
+  assert.equal(env.local().workspaceRecovery.phase, 'committed');
+  await env.complete(env.message('getWorkspaces'));
+  assert.deepEqual([...env.open.keys()], [1, 4]);
+  assert.equal(env.local().workspaceRecovery, undefined);
+});
+
 test('nonactive deletion keeps active live windows and only removes owned windows', async () => {
   const env = harness({ data: { workspaces: { a: saved('a'), b: saved('b', undefined, { windowIds: [2] }) }, activeWorkspaceId: 'a' },
     windows: [live(), live(2), live(3)] });
