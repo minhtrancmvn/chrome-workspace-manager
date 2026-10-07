@@ -552,6 +552,80 @@ test('empty backup import journals blank replacement before removing source', as
   assert.deepEqual([...restarted.open.values()].flatMap(window => window.tabs.map(tab => tab.url)), ['chrome://newtab']);
 });
 
+for (const sharePinnedTabs of [false, true]) {
+  test(`backup export snapshots once with sharing ${sharePinnedTabs}`, async () => {
+    const first = live(1, ['https://pin.test/', 'https://one.test/']);
+    first.tabs[0].pinned = true;
+    const second = live(2, ['https://pin.test/', 'https://two.test/']);
+    second.tabs[0].pinned = true;
+    second.state = 'maximized';
+    const inactive = saved('b', undefined, { windowIds: [3] });
+    const env = harness({ data: { workspaces: { a: saved('a'), b: inactive }, activeWorkspaceId: 'a',
+      settings: { sharePinnedTabs } }, windows: [first, second, live(3, ['https://inactive.test/'])] });
+    await env.complete(env.message('getWorkspaces'));
+    env.calls.length = 0;
+    env.storageWrites.length = 0;
+    const result = await env.complete(env.message('exportBackup'));
+    assert.equal(result.success, true);
+    assert.equal(env.count('windows.getAll'), 1);
+    assert.equal(env.storageWrites.length, 1);
+    assert.equal(result.data.version, '1.0.1');
+    assert.equal(typeof result.data.timestamp, 'number');
+    assert.equal(result.data.activeWorkspaceId, 'a');
+    assert.deepEqual(result.data.settings, { sharePinnedTabs });
+    assert.deepEqual(result.data.workspaces.a.windowIds, [1, 2]);
+    assert.deepEqual(result.data.workspaces.a.windows[0].windowState,
+      { state: 'normal', left: 10, top: 20, width: 1000, height: 800 });
+    assert.deepEqual(result.data.workspaces.a.windows[1].windowState, { state: 'maximized' });
+    assert.deepEqual(urls(result.data.workspaces.a), sharePinnedTabs ?
+      ['https://one.test/', 'https://two.test/'] :
+      ['https://pin.test/', 'https://one.test/', 'https://pin.test/', 'https://two.test/']);
+    assert.deepEqual(result.data.workspaces.b, inactive);
+    assert.deepEqual(result.data.sharedPinnedTabs.map(tab => tab.url), sharePinnedTabs ? ['https://pin.test/'] : []);
+    assert.deepEqual(Object.keys(result.data).sort(),
+      ['version', 'timestamp', 'workspaces', 'activeWorkspaceId', 'settings', 'sharedPinnedTabs'].sort());
+  });
+}
+
+test('backup export snapshots once with no live windows and preserves recovery data', async () => {
+  const pins = [{ url: 'https://pin.test/', title: 'Pin', pinned: true }];
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a',
+    settings: { sharePinnedTabs: true }, sharedPinnedTabs: pins }, windows: [] });
+  await env.complete(env.message('getWorkspaces'));
+  env.calls.length = 0;
+  env.storageWrites.length = 0;
+  const result = await env.complete(env.message('exportBackup'));
+  assert.equal(env.count('windows.getAll'), 1);
+  assert.equal(env.storageWrites.length, 1);
+  assert.deepEqual(urls(result.data.workspaces.a), ['https://a.test/']);
+  assert.deepEqual(result.data.workspaces.a.windowIds, []);
+  assert.deepEqual(result.data.sharedPinnedTabs, pins);
+});
+
+test('backup export snapshot storage rejection returns error without backup and preserves durable data', async () => {
+  const env = harness();
+  await env.complete(env.message('getWorkspaces'));
+  const before = env.stored();
+  env.fail('storage.set');
+  const result = await env.complete(env.message('exportBackup'));
+  assert.match(result.error, /Injected storage.set failure/);
+  assert.equal(result.data, undefined);
+  assert.deepEqual(env.stored(), before);
+  assert.equal((await env.complete(env.message('exportBackup'))).success, true);
+});
+
+test('backup export without valid active workspace performs no snapshot or writes', async () => {
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: null } });
+  await env.complete(env.message('getWorkspaces'));
+  env.calls.length = 0;
+  env.storageWrites.length = 0;
+  const result = await env.complete(env.message('exportBackup'));
+  assert.equal(result.success, true);
+  assert.equal(env.count('windows.getAll'), 0);
+  assert.equal(env.storageWrites.length, 0);
+  assert.deepEqual(urls(result.data.workspaces.a), ['https://a.test/']);
+});
+
 test('valid backup import/export retains settings and restores windows', async () => {
   const env = harness();
   const backup = await env.complete(env.message('exportBackup'));

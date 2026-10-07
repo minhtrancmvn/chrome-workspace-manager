@@ -584,8 +584,7 @@ async function renameWorkspace(workspaceId, newName) {
 async function exportBackup() {
   // Save current active workspace tabs and window state before exporting
   if (activeWorkspaceId && workspaces[activeWorkspaceId]) {
-    await saveCurrentWorkspaceTabs();
-    await saveCurrentWindowState();
+    await saveAllWorkspaceWindows();
   }
   
   const backupData = {

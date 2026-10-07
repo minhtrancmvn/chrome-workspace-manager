@@ -10,7 +10,7 @@ Requires Node.js with built-in `node:test`. No package installation, bundler or 
 
 Background tests execute actual background.js in isolated VM with mocked Chrome APIs. Fixtures control storage initialization, timers, delayed browser events, concurrent requests and rejected API/storage calls. Popup tests execute actual popup.js with minimal DOM and messaging mocks, covering dynamic values kept out of HTML markup, native switch button wiring, transport/background errors, and checkbox rollback. These mocks do not parse HTML or simulate native keyboard behavior; use a disposable browser to verify rendered DOM, focus, and Enter/Space activation. No real browser windows or user data touched by the unit suite.
 
-Covered: readiness, tab persistence, multi-window debounce, source snapshots, replacement-first transitions, durable transition journaling and worker-restart rollback/finish, startup target checkpoints, legacy window ownership and import/export/delete compatibility.
+Covered: readiness, tab persistence, multi-window debounce, source snapshots, replacement-first transitions, durable transition journaling and worker-restart rollback/finish, startup target checkpoints, legacy window ownership and import/export/delete compatibility. Export tests assert one full window scan and state write while preserving multi-window geometry, pins, inactive records, no-live recovery data, error handling, and the backup envelope.
 
 Mocks do not prove Chrome MV3 termination timing, full browser restart, physical display placement or fullscreen behavior. Validate those in disposable Chrome profile before release. Switching/import/startup can close every window in that profile.
 
