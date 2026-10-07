@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 
 Workspace Manager saves groups of browser windows and tabs, closes inactive workspaces, and restores them on demand. Plain JavaScript, HTML, and CSS; no production dependencies, bundler, backend, or compilation. Workspace data stays in the browser's extension storage.
 
-Chrome uses the root Manifest V3 service worker and requires Chrome 102+. Firefox uses a staged Manifest V3 background-script build and requires Firefox 115+. Firefox 157 smoke tests covered creation, tab persistence, fresh-workspace preservation, switching, two-window backup round trips, and shared-pin multiplicity/removal. Dia uses the Chromium-compatible build but functional behavior remains unverified. See `BROWSER_SUPPORT.md` for installation and limitations.
+Chrome uses the root Manifest V3 service worker and requires Chrome 102+. Firefox uses a staged Manifest V3 background-script build and requires Firefox 115+. Firefox 157 smoke tests covered creation, tab persistence, fresh-workspace preservation, switching, two-window backup round trips, and shared-pin multiplicity/removal. Forced event-page termination discarded the Marionette-controlled context before recovery could be asserted; Firefox startup recovery remains unverified. Dia uses the Chromium-compatible build but functional behavior remains unverified. See `BROWSER_SUPPORT.md` for installation and limitations.
 
 ## Model Routing
 

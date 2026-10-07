@@ -86,6 +86,7 @@ test('legacy metadata cannot inject attributes through workspace markup', () => 
     windows: { length: '<img data-injected="yes">' }, tabs: 1 };
   const card = env.run(`createWorkspaceElement(${JSON.stringify(workspace)})`);
   assert.equal(card.innerHTML.includes('data-injected'), false);
+  assert.equal(card.querySelector('.workspace-count').textContent.includes('<img data-injected="yes">'), true);
 });
 
 test('workspace switching uses native named button distinct from edit controls', () => {
