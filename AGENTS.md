@@ -6,7 +6,7 @@ Read `CLAUDE.md` for repository architecture, commands, testing, and workflow co
 
 - Work on feature branches. Preserve pre-existing user changes; stage exact approved paths. No main/master commits without explicit authorization.
 - Plain JavaScript extension, no build or production dependencies. Do not add a framework, bundler, backend, or package installation without a concrete need.
-- Run `node --test tests/background.test.cjs tests/browser-api.test.cjs`, relevant `node --check` commands, and `git diff --check` before claiming completion. Confirm tests actually ran; an empty name selection is not verification.
+- Run `node --test tests/background.test.cjs tests/browser-api.test.cjs tests/popup.test.cjs`, relevant `node --check` commands, and `git diff --check` before claiming completion. Confirm tests actually ran; an empty name selection is not verification.
 - Use disposable browser profiles for functional validation. Workspace switching, fresh creation, import, and startup restoration can close windows or replace stored data. Never use normal user profile for destructive tests.
 - Development changes require manifest version bump; documentation-only changes do not. Packaging, changelog edits, commits, pushes, signing, and store upload require separate authorization.
 - Keep `.claude/` local settings and planning files untracked unless user asks otherwise. Do not import instructions from unrelated agent configuration.

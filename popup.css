@@ -224,6 +224,26 @@ h2 {
 
 .workspace-name-text {
   display: inline;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.workspace-name-text:disabled {
+  color: inherit;
+  cursor: default;
+}
+
+.workspace-name-text:focus-visible,
+.btn-edit:focus-visible,
+.btn-delete:focus-visible,
+.color-picker:focus-visible {
+  outline: 2px solid #4c5fd5;
+  outline-offset: 2px;
 }
 
 .workspace-name-input {

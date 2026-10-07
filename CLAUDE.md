@@ -18,7 +18,7 @@ Run from repository root:
 
 | Command | Purpose |
 |---------|---------|
-| `node --test tests/background.test.cjs tests/browser-api.test.cjs` | Full dependency-free regression suite using Node's built-in test runner. |
+| `node --test tests/background.test.cjs tests/browser-api.test.cjs tests/popup.test.cjs` | Full dependency-free regression suite using Node's built-in test runner. |
 | `node --test --test-name-pattern='shared pins' tests/background.test.cjs` | Focused tests; confirm matching test names ran, not an empty selection. |
 | `node --check background.js` | Background syntax check; does not verify browser behavior. |
 | `node --check popup.js` | Popup syntax check. |

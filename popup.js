@@ -2,6 +2,19 @@
 
 let workspaces = {};
 let activeWorkspaceId = null;
+let sharePinnedTabsSetting = false;
+
+function sendPopupMessage(request, callback) {
+  chrome.runtime.sendMessage(request, response => {
+    const transportError = chrome.runtime.lastError;
+    let error = transportError?.message || response?.error;
+    if (!error && !response) error = 'No response from background script';
+    if (!error && !['getSettings', 'getWorkspaces'].includes(request.action) && response.success !== true) {
+      error = 'Invalid response from background script';
+    }
+    callback(error ? { error } : response);
+  });
+}
 
 // Initialize popup
 document.addEventListener('DOMContentLoaded', async () => {
@@ -27,9 +40,12 @@ function setupEventListeners() {
 // Load settings
 async function loadSettings() {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'getSettings' }, (response) => {
-      if (response && response.settings) {
-        document.getElementById('sharePinnedTabs').checked = response.settings.sharePinnedTabs || false;
+    sendPopupMessage({ action: 'getSettings' }, (response) => {
+      if (response.error || !response.settings) {
+        alert('Error loading settings: ' + (response.error || 'Invalid response from background script'));
+      } else {
+        sharePinnedTabsSetting = response.settings.sharePinnedTabs === true;
+        document.getElementById('sharePinnedTabs').checked = sharePinnedTabsSetting;
       }
       resolve();
     });
@@ -38,15 +54,23 @@ async function loadSettings() {
 
 // Update settings
 function updateSettings() {
-  const sharePinnedTabs = document.getElementById('sharePinnedTabs').checked;
-  
-  chrome.runtime.sendMessage({
+  const checkbox = document.getElementById('sharePinnedTabs');
+  const sharePinnedTabs = checkbox.checked;
+  checkbox.disabled = true;
+
+  sendPopupMessage({
     action: 'updateSettings',
     settings: { sharePinnedTabs }
   }, (response) => {
-    if (response && response.success) {
+    checkbox.disabled = false;
+    if (response.error) {
+      checkbox.checked = sharePinnedTabsSetting;
+      alert('Error updating settings: ' + response.error);
+      return;
+    }
+    sharePinnedTabsSetting = sharePinnedTabs;
+    if (response.success) {
       // Show brief confirmation
-      const checkbox = document.getElementById('sharePinnedTabs');
       const label = checkbox.parentElement;
       label.style.backgroundColor = '#e8f5e9';
       setTimeout(() => {
@@ -59,8 +83,10 @@ function updateSettings() {
 // Load workspaces from background
 async function loadWorkspaces() {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'getWorkspaces' }, (response) => {
-      if (response) {
+    sendPopupMessage({ action: 'getWorkspaces' }, (response) => {
+      if (response.error || !response.workspaces || typeof response.workspaces !== 'object' || Array.isArray(response.workspaces)) {
+        alert('Error loading workspaces: ' + (response.error || 'Invalid response from background script'));
+      } else {
         workspaces = response.workspaces || {};
         activeWorkspaceId = response.activeWorkspaceId;
         console.log('Loaded workspaces:', Object.keys(workspaces).length, 'Active:', activeWorkspaceId);
@@ -119,23 +145,23 @@ function createWorkspaceElement(workspace) {
   
   const windowCount = workspace.windows ? workspace.windows.length : (workspace.windowIds ? workspace.windowIds.length : 1);
   const lastAccessed = formatDate(workspace.lastAccessed);
-  const workspaceColor = workspace.color || '#667eea';
+  const workspaceColor = /^#[0-9a-f]{6}$/i.test(workspace.color) ? workspace.color : '#667eea';
   
   div.innerHTML = `
-    <div class="workspace-color-indicator" style="background-color: ${workspaceColor}"></div>
+    <div class="workspace-color-indicator"></div>
     <div class="workspace-info">
       <div class="workspace-name">
-        <span class="workspace-name-text">${escapeHtml(workspace.name)}</span>
-        <input type="text" class="workspace-name-input" value="${escapeHtml(workspace.name)}" style="display: none;">
+        <button type="button" class="workspace-name-text"></button>
+        <input type="text" class="workspace-name-input" style="display: none;">
         ${workspace.id === activeWorkspaceId ? '<span class="badge">ACTIVE</span>' : ''}
       </div>
       <div class="workspace-meta">
-        <div class="meta-line">${windowCount} window${windowCount !== 1 ? 's' : ''} • ${tabCount} tab${tabCount !== 1 ? 's' : ''}</div>
-        <div class="meta-line">Last accessed: ${lastAccessed}</div>
+        <div class="meta-line workspace-count"></div>
+        <div class="meta-line workspace-accessed"></div>
       </div>
     </div>
     <div class="workspace-actions">
-      <button class="btn-edit" data-id="${workspace.id}" title="Rename workspace">
+      <button type="button" class="btn-edit" title="Rename workspace" aria-label="Rename workspace">
         <svg width="20" height="20" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path opacity="0.2" d="M24 15.0002L17 8.00016L20.7075 4.29266C20.895 4.10527 21.1493 4 21.4144 4C21.6795 4 21.9337 4.10527 22.1213 4.29266L27.7075 9.87516C27.8949 10.0627 28.0002 10.3169 28.0002 10.582C28.0002 10.8471 27.8949 11.1014 27.7075 11.2889L24 15.0002Z" fill="currentColor"/>
           <path d="M11.5863 27.0002H6C5.73478 27.0002 5.48043 26.8948 5.29289 26.7073C5.10536 26.5197 5 26.2654 5 26.0002V20.4139C5.00012 20.149 5.10532 19.8951 5.2925 19.7077L20.7075 4.29266C20.895 4.10527 21.1493 4 21.4144 4C21.6795 4 21.9337 4.10527 22.1213 4.29266L27.7075 9.87516C27.8949 10.0627 28.0002 10.3169 28.0002 10.582C28.0002 10.8471 27.8949 11.1014 27.7075 11.2889L12.2925 26.7077C12.1051 26.8948 11.8511 27 11.5863 27.0002Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -144,8 +170,8 @@ function createWorkspaceElement(workspace) {
           <path d="M11.9362 26.936L5.06372 20.0635" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </button>
-      <input type="color" class="color-picker" value="${workspaceColor}" data-id="${workspace.id}" title="Change workspace color">
-      <button class="btn-delete" data-id="${workspace.id}" title="Delete workspace">
+      <input type="color" class="color-picker" title="Change workspace color" aria-label="Change workspace color">
+      <button type="button" class="btn-delete" title="Delete workspace" aria-label="Delete workspace">
         <svg width="20" height="20" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path opacity="0.2" d="M25 7V26C25 26.2652 24.8946 26.5196 24.7071 26.7071C24.5196 26.8946 24.2652 27 24 27H8C7.73478 27 7.48043 26.8946 7.29289 26.7071C7.10536 26.5196 7 26.2652 7 26V7H25Z" fill="currentColor"/>
           <path d="M27 7H5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -158,8 +184,22 @@ function createWorkspaceElement(workspace) {
     </div>
   `;
   
+  div.querySelector('.workspace-count').textContent = `${windowCount} window${windowCount !== 1 ? 's' : ''} • ${tabCount} tab${tabCount !== 1 ? 's' : ''}`;
+  div.querySelector('.workspace-accessed').textContent = `Last accessed: ${lastAccessed}`;
+  const nameText = div.querySelector('.workspace-name-text');
+  nameText.textContent = workspace.name;
+  nameText.setAttribute('aria-label', `Switch to workspace ${workspace.name}`);
+  nameText.disabled = workspace.id === activeWorkspaceId;
+  nameText.addEventListener('click', event => {
+    event.stopPropagation();
+    if (!nameText.disabled) switchWorkspace(workspace.id);
+  });
+  div.querySelector('.workspace-name-input').value = workspace.name;
+  div.querySelector('.workspace-color-indicator').style.backgroundColor = workspaceColor;
+
   // Add event listeners
   const editBtn = div.querySelector('.btn-edit');
+  editBtn.dataset.id = workspace.id;
   editBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     e.preventDefault();
@@ -167,6 +207,8 @@ function createWorkspaceElement(workspace) {
   });
   
   const colorPicker = div.querySelector('.color-picker');
+  colorPicker.dataset.id = workspace.id;
+  colorPicker.value = workspaceColor;
   colorPicker.addEventListener('click', (e) => {
     e.stopPropagation();
   });
@@ -176,6 +218,7 @@ function createWorkspaceElement(workspace) {
   });
   
   const deleteBtn = div.querySelector('.btn-delete');
+  deleteBtn.dataset.id = workspace.id;
   deleteBtn.addEventListener('click', (e) => {
     console.log('Delete button clicked!');
     e.stopPropagation();
@@ -260,19 +303,12 @@ function startRenameWorkspace(workspaceId, workspaceElement) {
 function renameWorkspace(workspaceId, newName) {
   console.log('Renaming workspace:', workspaceId, 'to:', newName);
   
-  chrome.runtime.sendMessage({
+  sendPopupMessage({
     action: 'renameWorkspace',
     workspaceId: workspaceId,
     name: newName
   }, (response) => {
     console.log('Rename response:', response);
-    
-    // Check for Chrome runtime errors
-    if (chrome.runtime.lastError) {
-      console.error('Chrome runtime error:', chrome.runtime.lastError);
-      alert('Failed to rename workspace: ' + chrome.runtime.lastError.message);
-      return;
-    }
     
     if (response && response.success) {
       console.log('Workspace renamed successfully');
@@ -299,7 +335,7 @@ function createWorkspace() {
   
   console.log('Creating workspace with includeCurrentTabs:', includeCurrentTabs);
   
-  chrome.runtime.sendMessage({
+  sendPopupMessage({
     action: 'createWorkspace',
     name: name,
     includeCurrentTabs: includeCurrentTabs,
@@ -320,7 +356,7 @@ function createWorkspace() {
 
 // Update workspace color
 function updateWorkspaceColor(workspaceId, color) {
-  chrome.runtime.sendMessage({
+  sendPopupMessage({
     action: 'updateWorkspaceColor',
     workspaceId: workspaceId,
     color: color
@@ -335,7 +371,7 @@ function updateWorkspaceColor(workspaceId, color) {
 
 // Switch to workspace
 function switchWorkspace(workspaceId) {
-  chrome.runtime.sendMessage({
+  sendPopupMessage({
     action: 'switchWorkspace',
     workspaceId: workspaceId
   }, (response) => {
@@ -360,23 +396,11 @@ function deleteWorkspace(workspaceId) {
   console.log('Confirming deletion of:', workspace.name);
   if (confirm(`Delete workspace "${workspace.name}"?`)) {
     console.log('User confirmed deletion, sending message to background...');
-    chrome.runtime.sendMessage({
+    sendPopupMessage({
       action: 'deleteWorkspace',
       workspaceId: workspaceId
     }, (response) => {
       console.log('Response received from background:', response);
-      
-      if (chrome.runtime.lastError) {
-        console.error('Runtime error:', chrome.runtime.lastError);
-        alert('Error deleting workspace: ' + chrome.runtime.lastError.message);
-        return;
-      }
-      
-      if (!response) {
-        console.error('No response received from background');
-        alert('Error: No response from background script');
-        return;
-      }
       
       if (response.error) {
         console.error('Delete error from background:', response.error);
@@ -423,7 +447,7 @@ function escapeHtml(text) {
 
 // Export backup
 function exportBackup() {
-  chrome.runtime.sendMessage({ action: 'exportBackup' }, (response) => {
+  sendPopupMessage({ action: 'exportBackup' }, (response) => {
     if (response.error) {
       alert('Error exporting backup: ' + response.error);
       return;
@@ -470,7 +494,7 @@ function importBackup(event) {
         return;
       }
       
-      chrome.runtime.sendMessage({ 
+      sendPopupMessage({
         action: 'importBackup',
         data: data
       }, (response) => {
