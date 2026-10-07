@@ -22,10 +22,10 @@ Dia is Chromium-based and is expected to use the repository-root manifest and it
 
 ## Known compatibility limits
 
-- Saved blank-tab records remain compatible with existing Chrome backups. Firefox restoration converts blank URLs to `about:blank`; Firefox 156 rejects `tabs.create({url: 'about:newtab'})` with `Illegal URL`, so that internal URL is not used for API-created tabs.
+- Saved blank-tab records remain compatible with existing Chrome backups. Firefox restoration converts blank URLs to `about:blank`; Firefox 156.0.1 previously rejected `tabs.create({url: 'about:newtab'})` with `Illegal URL`, so that internal URL is not used for API-created tabs.
 - Firefox does not support `windows.onBoundsChanged` (MDN Browser Compat Data lists `version_added: false`, bug 1762975). Registration is optional, so tab persistence still works. Geometry is captured on explicit snapshot/switch/export or tab events; resize-only persistence is not immediate in Firefox. Physical display placement and maximized/fullscreen behavior still need target-version validation.
 - Source: [MDN Browser Compat Data for `windows`](https://raw.githubusercontent.com/mdn/browser-compat-data/main/webextensions/api/windows.json).
-- Firefox 156.0.1 was tested in a fresh temporary profile: add-on loading, popup creation, tab-only persistence, fresh-workspace outgoing preservation and switching passed. Multi-window/display states, pins, backup round trips and full browser restart remain release checks; do not infer them from this smoke test.
+- Extension 2.3.17 was tested on Firefox 157.0 in fresh temporary profiles: add-on loading, popup creation, tab-only persistence, fresh-workspace outgoing preservation, switching, two-window export/import, deliberate duplicate shared pins, repeated enable without duplicate growth, and clearing all live shared pins passed. The staged build contains the same ten runtime paths as Chromium packaging; nine files are byte-identical, with Firefox-specific manifest adaptations. Physical display placement, maximized/fullscreen behavior, full browser restart, and event-page termination recovery remain release checks; do not infer them from this smoke test.
 - No Firefox signing, AMO submission, browser store publication, or release archive operation is performed by this workflow.
 
 ## Validation
