@@ -6,7 +6,7 @@ Run from repository root:
 node --test tests/*.test.cjs
 ```
 
-Use Node.js 24, matching GitHub Actions. Release-builder tests cover exact Chromium/unsigned Firefox asset names and runtime contents, manifest/tag matching, checksums, default output, invalid tags, unsafe/nonempty destinations, missing files, ZIP failures, and failure cleanup. CI runs this full suite; version-tag builds use the same builder. These checks do not publish a GitHub Release or prove browser compatibility.
+Use Node.js 24, matching GitHub Actions. Release-builder tests cover exact Chromium/unsigned Firefox asset names and runtime contents, manifest/tag matching, checksums, default output, invalid tags, unsafe/nonempty destinations, missing files, ZIP failures, and failure cleanup. CI runs this full suite; version-tag builds use the same builder. Main version-bump releases run tests and build first, then publish only after checksums pass and the tag still points at the tested commit. These checks do not prove browser compatibility.
 
 Requires Node.js with built-in `node:test`. Packaging tests also require Bash, `zip`, and `unzip`; they run a copied packaging script in disposable fixtures and remove those fixture archives afterward. Repository release ZIPs and changelog are untouched. No package installation, bundler, or production dependency. Release packaging tests invoke `zip` and `unzip` in temporary fixture roots only; canonical builds require Bash, Node.js, `zip`, and `unzip`, and CI runs on Ubuntu.
 
