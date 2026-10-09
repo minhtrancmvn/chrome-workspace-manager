@@ -1,241 +1,53 @@
-# Git Workflow Guide
+# Git Workflow
 
-This document explains how to use Git for the Chrome Workspace Manager project.
+Repository: [minhtrancmvn/chrome-workspace-manager](https://github.com/minhtrancmvn/chrome-workspace-manager). `main` is the integration branch; development belongs on feature branches.
 
-## Repository Setup
+## Development
 
-✅ **Repository**: `git@github.com:minhtrancmvn/chrome-workspace-manager.git`
-✅ **Branch**: `main`
-✅ **Remote**: `origin`
+Inspect local changes before switching or updating branches. Do not overwrite unrelated work.
 
-## Daily Workflow
-
-### 1. Check Status
-
-Before starting work:
 ```bash
-git status
+git status --short --branch
+git switch -c fix/short-description
+# Edit source and bump manifest.json when runtime changes.
+node --test tests/*.test.cjs
+git diff --check
 ```
 
-### 2. Pull Latest Changes
-
-Always pull before making changes:
-```bash
-git pull origin main
-```
-
-### 3. Make Changes
-
-Edit files, test your changes, package new version:
-```bash
-# Make your edits...
-./package-extension.sh
-```
-
-### 4. Stage Changes
-
-Add specific files:
-```bash
-git add background.js popup.js manifest.json
-```
-
-Or add everything:
-```bash
-git add .
-```
-
-### 5. Commit Changes
-
-Write clear commit messages:
-```bash
-git commit -m "Fix: Description of what you fixed"
-# or
-git commit -m "Feature: Description of new feature"
-# or
-git commit -m "Release: v2.3.1 - Brief summary"
-```
-
-### 6. Push to GitHub
+When committing is authorized, stage exact intended paths and inspect them:
 
 ```bash
-git push origin main
-```
-
-## Release Workflow
-
-When releasing a new version:
-
-1. **Update version** in `manifest.json`
-2. **Package extension**: `./package-extension.sh`
-3. **Update CHANGELOG**: Add entry to `releases/CHANGELOG.md`
-4. **Commit all changes**:
-   ```bash
-   git add .
-   git commit -m "Release: v2.4.0 - Feature summary"
-   ```
-5. **Tag the release**:
-   ```bash
-   git tag -a v2.4.0 -m "Version 2.4.0"
-   ```
-6. **Push with tags**:
-   ```bash
-   git push origin main --tags
-   ```
-
-## Commit Message Guidelines
-
-Use prefixes for clarity:
-
-- `Fix:` - Bug fixes
-- `Feature:` - New features
-- `Improve:` - Improvements to existing features
-- `Docs:` - Documentation updates
-- `Style:` - CSS/UI changes
-- `Refactor:` - Code refactoring
-- `Release:` - Version releases
-
-### Examples
-
-```bash
-git commit -m "Fix: Workspace data corruption during switching"
-git commit -m "Feature: Add workspace rename capability"
-git commit -m "Improve: Better error handling for rename operations"
-git commit -m "Docs: Update README with installation steps"
-git commit -m "Release: v2.3.0 - Blank tab filtering"
-```
-
-## Useful Commands
-
-### View Commit History
-
-```bash
-git log --oneline --graph --all
-```
-
-### View Changes
-
-```bash
-# Unstaged changes
-git diff
-
-# Staged changes
+git add background.js manifest.json tests/background.test.cjs
 git diff --cached
-
-# Changes in specific file
-git diff background.js
+git commit -m "fix: describe behavior and reason"
 ```
 
-### Undo Changes
+Use conventional prefixes such as `fix:`, `feat:`, `docs:`, `refactor:`, `test:`, and `chore:`. Keep local plans, settings, test profiles and generated artifacts out of commits. Push a feature branch and open a pull request when authorized; do not commit directly to or force-push `main`.
 
 ```bash
-# Discard unstaged changes in file
-git checkout -- background.js
-
-# Unstage file (keep changes)
-git reset HEAD background.js
-
-# Undo last commit (keep changes)
-git reset --soft HEAD~1
+git push -u origin fix/short-description
 ```
 
-### Check Remote
+CI runs syntax checks and the dependency-free test suite. Configure the `Tests` job as a required check through repository settings if desired. Review and merge the pull request before preparing its release tag.
+
+## Releases
+
+Follow [RELEASE_WORKFLOW.md](RELEASE_WORKFLOW.md) for the canonical sequence: validate source, build local assets if needed, merge reviewed source, create an immutable annotated tag matching the manifest, download the successful tag build, verify assets, and explicitly create a draft GitHub Release. Publication is separate.
+
+Do not commit ZIPs. `.gitignore` excludes `*.zip` and `dist/`. Historical ZIPs removed from the current `releases/` tree remain available in Git history. That folder retains notes and installation media only.
+
+Packaging, committing, pushing a tag, creating a draft, publishing, and browser-store submission are distinct actions requiring authorization. A normal development commit does not imply any of them.
+
+## Useful read-only checks
 
 ```bash
+git status --short --branch
+git diff
+git diff --cached
+git log --oneline --graph --all
 git remote -v
+git tag --list
+gh release list
 ```
 
-### Branch Management
-
-```bash
-# List branches
-git branch
-
-# Create new branch
-git checkout -b feature/new-feature
-
-# Switch branches
-git checkout main
-
-# Delete branch
-git branch -d feature/old-feature
-```
-
-## .gitignore
-
-The following files/folders are ignored:
-
-- `.DS_Store` - macOS system files
-- `.vscode/` - VS Code settings
-- `*.backup` - Backup files
-- `*.log` - Log files
-- `node_modules/` - Dependencies (if any)
-
-Note: Release zips in `releases/` folder are **included** in version control.
-
-## Tips
-
-1. **Commit often**: Small, focused commits are easier to review
-2. **Pull before push**: Always pull latest changes before pushing
-3. **Test before commit**: Make sure extension works before committing
-4. **Write clear messages**: Future you will thank present you
-5. **Tag releases**: Makes it easy to checkout specific versions
-
-## Troubleshooting
-
-### Push Rejected
-
-```bash
-git pull origin main --rebase
-git push origin main
-```
-
-### Wrong Commit Message
-
-```bash
-git commit --amend -m "New message"
-git push --force origin main  # Use with caution!
-```
-
-### Merge Conflicts
-
-```bash
-git pull origin main
-# Fix conflicts in files
-git add .
-git commit -m "Merge: Resolved conflicts"
-git push origin main
-```
-
-## GitHub Integration
-
-Your repository is now available at:
-**https://github.com/minhtrancmvn/chrome-workspace-manager**
-
-### Creating a Release on GitHub
-
-1. Go to repository on GitHub
-2. Click "Releases" → "Create a new release"
-3. Choose tag (e.g., `v2.3.0`)
-4. Set title (e.g., "Version 2.3.0 - Blank Tab Filtering")
-5. Add description from `releases/CHANGELOG.md`
-6. Attach `releases/workspace-manager-v2.3.0.zip`
-7. Publish release
-
-## Quick Reference
-
-```bash
-# Daily workflow
-git pull origin main
-# ... make changes ...
-git add .
-git commit -m "Fix: Description"
-git push origin main
-
-# Release workflow
-# ... update version ...
-./package-extension.sh
-git add .
-git commit -m "Release: vX.Y.Z - Summary"
-git tag -a vX.Y.Z -m "Version X.Y.Z"
-git push origin main --tags
-```
+For a rejected push, inspect remote history before choosing merge or rebase. Do not use force-pushes or reset/discard commands as generic fixes. Preserve user-owned work and ask before rewriting shared history.

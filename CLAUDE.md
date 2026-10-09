@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 
 Workspace Manager saves groups of browser windows and tabs, closes inactive workspaces, and restores them on demand. Plain JavaScript, HTML, and CSS; no production dependencies, bundler, backend, or compilation. Workspace data stays in the browser's extension storage.
 
-Chrome uses the root Manifest V3 service worker and requires Chrome 102+. Firefox uses a staged Manifest V3 background-script build and requires Firefox 115+. Firefox 157 smoke tests covered creation, tab persistence, fresh-workspace preservation, switching, two-window backup round trips, and shared-pin multiplicity/removal. Forced event-page termination discarded the Marionette-controlled context before recovery could be asserted; Firefox startup recovery remains unverified. Dia uses the Chromium-compatible build but functional behavior remains unverified. See `BROWSER_SUPPORT.md` for installation and limitations.
+Chrome uses the root Manifest V3 service worker and requires Chrome 102+. Firefox uses a staged Manifest V3 background-script build and requires Firefox 115+. Firefox 157 smoke tests covered creation, tab persistence, fresh-workspace preservation, switching, two-window backup round trips, and shared-pin multiplicity/removal. Firefox 157.0.1 headless follow-up verified idle event-page stop/wake and workspace ID/name storage retention across browser restart plus temporary add-on reload; interrupted-transition recovery and automatic startup window restoration remain unverified. Dia 1.51.1 loaded the Chromium-compatible build and rendered the popup; direct background-function checks are partial coverage, with a separate popup `createWorkspace` message probe passing but no popup-control interaction coverage. Extension 2.3.17 backup validation rejected Dia start-page URLs and zero-sized normal geometry. Version 2.3.18 filters those blank tabs and omits unusable live bounds when creating snapshots; existing inactive snapshots/backups are not migrated. Two Dia follow-up attempts loaded 2.3.18 but blocked during fixture URL readiness before workspace messages; real backup round trips and full Dia support remain unverified. See `BROWSER_SUPPORT.md` for installation and limitations.
 
 ## Model Routing
 
@@ -18,16 +18,17 @@ Run from repository root:
 
 | Command | Purpose |
 |---------|---------|
-| `node --test tests/background.test.cjs tests/browser-api.test.cjs tests/popup.test.cjs tests/package-extension.test.cjs` | Full dependency-free regression suite using Node's built-in test runner. |
+| `node --test tests/*.test.cjs` | Full dependency-free regression suite using Node's built-in test runner, including release-builder tests. |
 | `node --test --test-name-pattern='shared pins' tests/background.test.cjs` | Focused tests; confirm matching test names ran, not an empty selection. |
 | `node --check background.js` | Background syntax check; does not verify browser behavior. |
 | `node --check popup.js` | Popup syntax check. |
 | `git diff --check` | Changed-line whitespace check. |
 | `node scripts/prepare-browser.cjs firefox /tmp/workspace-manager-firefox` | Stage Firefox runtime files with alternate manifest; destination must be outside repository and absent or empty. No ZIP, signing, or upload. |
-| `./package-extension.sh` | Release-only runtime-allowlist ZIP creation under `releases/`; requires Bash, Node.js and `zip`, optionally prompts for changelog input, preserves existing archive on validation/ZIP failure. |
+| `node scripts/build-release.cjs --tag vMAJOR.MINOR.PATCH` | Canonical release asset builder; tag must match manifest. Creates Chromium/unsigned Firefox ZIPs plus SHA256SUMS in absent/empty ignored `dist/`; requires Node.js 24, Bash, `zip`, `unzip`. No publication. |
+| `./package-extension.sh` | Legacy Chromium-only ZIP creation under `releases/`; optionally prompts for changelog input, preserves existing archive on validation/ZIP failure. Generated ZIPs ignored, not committed. |
 | `./convert-icons.sh` | Regenerate PNG icons with ImageMagick; may attempt Homebrew installation if missing. |
 
-No npm installation, build target, configured formatter/linter, or CI workflow is required to run the existing tests. Tests use isolated Chrome API mocks; they do not access browser profiles. See `tests/README.md`.
+No npm installation, bundler, or configured formatter/linter is required. GitHub CI runs syntax checks and all tests on branch pushes/PRs; version tag pushes run the release asset workflow with read-only permissions. GitHub draft creation and publication are explicit CLI/manual steps, not automatic. Actions use full SHA pins, updated by Dependabot. Tests use isolated Chrome API mocks and disposable packaging fixtures; they do not access browser profiles. See `tests/README.md` and `RELEASE_WORKFLOW.md`.
 
 For Chrome development, open `chrome://extensions/`, enable Developer mode, load repository root unpacked, then reload extension after edits and reopen popup. Inspect service worker and popup separately. For Firefox, load staged manifest through `about:debugging#/runtime/this-firefox`; temporary add-ons disappear when Firefox closes.
 
