@@ -6,10 +6,12 @@ GitHub Releases is the distribution channel for versioned binaries. Git tracks s
 
 - `manifest.json` uses `MAJOR.MINOR.PATCH`; the release tag is exactly `vMAJOR.MINOR.PATCH`, without leading zeros or prerelease suffixes.
 - Major versions cover breaking changes, minor versions add compatible features, patch versions fix bugs.
-- Tags point to reviewed, committed source. Never move or reuse a published release tag.
+- Tags point to reviewed, committed source. Never move or reuse a published release tag. Automated tag refs are lightweight and point at the exact main merge commit.
 - Tag builds run syntax checks and all `tests/*.test.cjs`, build Chromium and unsigned Firefox assets, verify ZIP contents, and produce SHA-256 checksums.
-- Workflows have `contents: read`, immutable action SHA pins, job timeouts, and no publication token. Creating a tag builds assets; it does not create or publish a GitHub Release.
-- Creation of a draft release, publication, Firefox signing, and browser-store submission are separate approvals/actions.
+- Workflows use immutable action SHA pins and job timeouts. CI and the tag-artifact workflow use `contents: read` and never publish.
+- A push to `main` that changes `manifest.version` runs tests and builds both packages before an isolated `contents: write` job creates the exact version tag at that commit and publishes a GitHub Release. Same-version/doc-only merges do not publish. Invalid/decreasing versions, existing tags/releases, or failed build/checksums fail closed.
+- Firefox signing and browser-store submissions remain separate; auto-release publishes only GitHub assets.
+- A direct version tag push still runs the artifact-only workflow; it does not create a GitHub Release. Do not use direct tags as the automatic publishing path. The publishing workflow runs only on `main` pushes; its tests/build pass artifacts across isolated jobs, and only the final job receives `contents: write`. Existing version tags/releases cause a hard failure without overwrite. The `v2.3.18` release predates this workflow and is unchanged.
 
 ## 1. Prepare and validate source
 
@@ -56,25 +58,21 @@ unzip -Z1 "dist/workspace-manager-$TAG-firefox-unsigned.zip"
 
 On Linux, `sha256sum --check SHA256SUMS` is equivalent. Checksums detect changed bytes, not signer identity or browser-store approval. Extract each untrusted download into its own fresh directory; do not execute scripts from an archive.
 
-## 3. Commit, merge, and tag only after approval
+## 3. Merge a version bump for automatic release
 
-The `CI` workflow runs on branch pushes and pull requests. Configure the `Tests` job as a required branch-protection check on `main` if desired; repository settings are not changed by these files. Merge reviewed source before creating its release tag. Commit and push are explicit actions, not side effects of packaging.
+The `CI` workflow runs on branch pushes and pull requests. Configure the `Tests` job as a required branch-protection check on `main` if desired; repository settings are not changed by these files. Review and merge the version bump through the normal protected-branch process.
 
-Once the intended commit is on `main`, work from a clean checkout:
+When a push to `main` changes `manifest.version` to a strictly greater valid `MAJOR.MINOR.PATCH`, `Auto release on version bump` runs the full regression suite, builds and checksum-verifies both packages, creates `vVERSION` at that exact main commit, then publishes the GitHub Release. Same-version merges skip. Malformed/decreasing versions, failed tests/builds/checksums, and conflicting tags/releases fail closed. Publisher uses isolated `contents: write`; tests/build job stays read-only. It rechecks that the tag still targets the tested commit immediately before publication. An upload interruption leaves a marked draft so reruns can safely finish it.
 
-```bash
-git switch main
-git pull --ff-only
-test -z "$(git status --porcelain)" || { printf 'Release checkout must be clean\n' >&2; exit 1; }
-VERSION=$(node -p "require('./manifest.json').version")
-TAG="v$VERSION"
-git tag -a "$TAG" -m "Release $TAG"
-git push origin "$TAG"
-```
+Do not manually create/push the tag for an automatic release. GitHub suppresses downstream workflow events caused by `GITHUB_TOKEN`; the auto-release workflow builds and publishes in the same run. The already published `v2.3.18` predates this automation and remains unchanged.
 
-The commands above create and push a release tag; run them only when authorized. Existing tags cause tagging to fail rather than silently moving history. The `Release assets` workflow checks that tag against the manifest on that exact commit and packages it. A malformed or mismatched tag fails before release assets are built.
+## 4. Manual tag build (artifact only)
 
-## 4. Retrieve the successful tag build
+A manually pushed `vVERSION` tag runs `Release assets`: it validates the tag/manifest, runs tests, builds both packages, checks checksums, and uploads a temporary Actions artifact. It does not create a GitHub Release. This path is for builds where a GitHub Release is not wanted yet.
+
+Do not use a tag to bypass a failed main version-bump run. Repair the cause and use a new version bump/merge; tags/releases are immutable release identifiers and collisions fail closed.
+
+## 5. Retrieve the successful tag build
 
 Use GitHub CLI from this repository. Select the successful run for the exact tag and verify its commit before downloading. Do not attach a fresh build from an unrelated dirty checkout.
 

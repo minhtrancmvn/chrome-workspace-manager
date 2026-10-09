@@ -1,0 +1,221 @@
+name: Auto release on version bump
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    name: Detect manifest version change
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Compare previous and current manifest versions
+        id: version
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ ! "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            echo 'Cannot resolve previous main commit; refusing automatic release.' >&2
+            exit 1
+          fi
+          git show "$BEFORE_SHA:manifest.json" > "$RUNNER_TEMP/manifest-before.json"
+          node scripts/release-version.cjs "$RUNNER_TEMP/manifest-before.json" manifest.json >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Test and build release assets
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check syntax
+        run: |
+          bash -n package-extension.sh
+          for file in background.js browser-api.js popup.js scripts/*.cjs tests/*.cjs; do
+            node --check "$file"
+          done
+      - name: Run regression tests
+        run: node --test tests/*.test.cjs
+      - name: Build verified release assets
+        env:
+          RELEASE_VERSION: ${{ needs.detect.outputs.version }}
+        run: node scripts/build-release.cjs --tag "v$RELEASE_VERSION"
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+      - name: Preserve release assets for publisher
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: automatic-release-${{ github.run_id }}
+          path: |
+            dist/workspace-manager-v${{ needs.detect.outputs.version }}-chromium.zip
+            dist/workspace-manager-v${{ needs.detect.outputs.version }}-firefox-unsigned.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish verified GitHub Release
+    needs: [detect, build]
+    if: needs.detect.outputs.release == 'true' && needs.build.result == 'success'
+    concurrency:
+      group: auto-release-main-publish
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: automatic-release-${{ github.run_id }}
+          path: dist
+      - name: Verify downloaded checksums
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+      - name: Find or create recoverable draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$RELEASE_VERSION"
+          repository="$GITHUB_REPOSITORY"
+          api="https://api.github.com/repos/$repository"
+          headers=(--header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28')
+
+          ref_status=$(curl --silent --output "$RUNNER_TEMP/ref.json" --write-out '%{http_code}' "${headers[@]}" "$api/git/ref/tags/$TAG")
+          if [[ "$ref_status" == 404 ]]; then
+            gh api --method POST "repos/$repository/git/refs" --field ref="refs/tags/$TAG" --field sha="$GITHUB_SHA"
+          elif [[ "$ref_status" == 200 ]]; then
+            ref_type=$(node -p "require('$RUNNER_TEMP/ref.json').object.type")
+            ref_sha=$(node -p "require('$RUNNER_TEMP/ref.json').object.sha")
+            if [[ "$ref_type" != commit || "$ref_sha" != "$GITHUB_SHA" ]]; then
+              echo "Existing $TAG does not point to this main commit; refusing to overwrite." >&2
+              exit 1
+            fi
+          else
+            echo "Tag lookup returned HTTP $ref_status; refusing to continue." >&2
+            cat "$RUNNER_TEMP/ref.json" >&2
+            exit 1
+          fi
+
+          release_status=$(curl --silent --output "$RUNNER_TEMP/release.json" --write-out '%{http_code}' "${headers[@]}" "$api/releases/tags/$TAG")
+          if [[ "$release_status" == 404 ]]; then
+            marker="<!-- automatic-release-commit:$GITHUB_SHA -->"
+            gh release create "$TAG" --verify-tag --draft --generate-notes --notes "$marker" --title "Workspace Manager $TAG"
+            release_status=$(curl --silent --output "$RUNNER_TEMP/release.json" --write-out '%{http_code}' "${headers[@]}" "$api/releases/tags/$TAG")
+          fi
+          if [[ "$release_status" == 200 ]]; then
+            existing_draft=$(node -p "require('$RUNNER_TEMP/release.json').draft")
+            if [[ "$existing_draft" != true ]]; then
+              echo "A published $TAG release already exists; refusing to modify it." >&2
+              exit 1
+            fi
+          fi
+          if [[ "$release_status" != 200 ]]; then
+            echo "Release lookup returned HTTP $release_status; refusing to upload assets." >&2
+            cat "$RUNNER_TEMP/release.json" >&2
+            exit 1
+          fi
+          is_draft=$(node -p "require('$RUNNER_TEMP/release.json').draft")
+          release_id=$(node -p "require('$RUNNER_TEMP/release.json').id")
+          marker="<!-- automatic-release-commit:$GITHUB_SHA -->"
+          has_marker=$(MARKER="$marker" node -e 'const fs=require("node:fs");const marker=process.env.MARKER;const release=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(release.body?.includes(marker)===true));' "$RUNNER_TEMP/release.json")
+          if [[ "$is_draft" != true || -z "$release_id" || "$has_marker" != true ]]; then
+            echo "Existing $TAG release is not this workflow's unpublished draft; refusing to modify it." >&2
+            exit 1
+          fi
+          echo "id=$release_id" >> "$GITHUB_OUTPUT"
+      - name: Upload assets to draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.detect.outputs.version }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets"
+          headers=(--header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json' --header 'X-GitHub-Api-Version: 2022-11-28')
+          for name in "workspace-manager-v$RELEASE_VERSION-chromium.zip" "workspace-manager-v$RELEASE_VERSION-firefox-unsigned.zip" SHA256SUMS; do
+            status=$(curl --silent --output "$RUNNER_TEMP/assets.json" --write-out '%{http_code}' "${headers[@]}" "$api?per_page=100")
+            if [[ "$status" != 200 ]]; then
+              echo "Asset lookup returned HTTP $status; refusing to upload." >&2
+              cat "$RUNNER_TEMP/assets.json" >&2
+              exit 1
+            fi
+            asset_id=$(ASSET_NAME="$name" node -e 'const fs=require("node:fs");const name=process.env.ASSET_NAME;const assets=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const asset=assets.find(item=>item.name===name);if(asset)process.stdout.write(String(asset.id));' "$RUNNER_TEMP/assets.json")
+            if [[ -n "$asset_id" ]]; then
+              remote_digest=$(ASSET_ID="$asset_id" node -e 'const fs=require("node:fs");const id=Number(process.env.ASSET_ID);const assets=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const asset=assets.find(item=>item.id===id);if(asset?.digest)process.stdout.write(asset.digest);' "$RUNNER_TEMP/assets.json")
+              local_digest="sha256:$(sha256sum "dist/$name" | cut -d ' ' -f 1)"
+              if [[ -z "$remote_digest" ]]; then
+                echo "Existing asset $name has no API digest; refusing to replace or publish it." >&2
+                exit 1
+              fi
+              if [[ "$remote_digest" != "$local_digest" ]]; then
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+                gh release upload "v$RELEASE_VERSION" "dist/$name"
+              fi
+            else
+              gh release upload "v$RELEASE_VERSION" "dist/$name"
+            fi
+          done
+      - name: Recheck tag target before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          status=$(curl --silent --output "$RUNNER_TEMP/ref-final.json" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/v$RELEASE_VERSION")
+          if [[ "$status" != 200 ]]; then
+            echo "Final tag lookup returned HTTP $status; refusing publication." >&2
+            cat "$RUNNER_TEMP/ref-final.json" >&2
+            exit 1
+          fi
+          ref_type=$(node -p "require('$RUNNER_TEMP/ref-final.json').object.type")
+          ref_sha=$(node -p "require('$RUNNER_TEMP/ref-final.json').object.sha")
+          if [[ "$ref_type" != commit || "$ref_sha" != "$GITHUB_SHA" ]]; then
+            echo "Tag v$RELEASE_VERSION no longer targets this workflow commit; refusing publication." >&2
+            exit 1
+          fi
+      - name: Publish completed draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+        run: |
+          set -euo pipefail
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --field draft=false

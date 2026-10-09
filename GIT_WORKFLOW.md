@@ -32,7 +32,7 @@ CI runs syntax checks and the dependency-free test suite. Configure the `Tests` 
 
 ## Releases
 
-Follow [RELEASE_WORKFLOW.md](RELEASE_WORKFLOW.md) for the canonical sequence: validate source, build local assets if needed, merge reviewed source, create an immutable annotated tag matching the manifest, download the successful tag build, verify assets, and explicitly create a draft GitHub Release. Publication is separate.
+Follow [RELEASE_WORKFLOW.md](RELEASE_WORKFLOW.md): validate source and bump `manifest.version` for a user-facing release, then merge reviewed changes to `main`. When the merged manifest version differs from its first parent, GitHub Actions tests, builds/checksums assets, creates the exact version tag at that merge commit, and publishes the GitHub Release. Same-version/documentation-only merges do not release. Existing tag/release collisions fail closed. Direct tags remain artifact-only; do not use them to publish. The automated workflow creates releases as soon as a version-bump merge passes; the existing v2.3.18 release is unchanged. Review release notes after publication and fix future versions through a new version bump rather than reusing tags.
 
 Do not commit ZIPs. `.gitignore` excludes `*.zip` and `dist/`. Historical ZIPs removed from the current `releases/` tree remain available in Git history. That folder retains notes and installation media only.
 
