@@ -71,37 +71,30 @@ Workspace Manager/
 ├── popup.html         # Extension popup interface
 ├── popup.js           # Popup interaction logic
 ├── popup.css          # Popup styling
-├── icons/             # Extension icons (add your own)
+├── icons/             # Extension icons
 │   ├── icon16.png
 │   ├── icon48.png
 │   └── icon128.png
+├── scripts/           # Runtime staging and release asset verification
+├── tests/             # Dependency-free regression suite
 └── README.md          # This file
 ```
 
-## Icon Placeholders
+## Icons
 
-⚠️ **Note**: This extension includes placeholder icon references. You need to add your own icon images:
-
-- `icons/icon16.png` (16x16 pixels)
-- `icons/icon48.png` (48x48 pixels)
-- `icons/icon128.png` (128x128 pixels)
-
-You can create simple icons using any image editor or online icon generators.
+The repository includes the 16, 48, and 128 pixel PNG icons referenced by the manifest.
 
 ## Releases
 
-All packaged releases are available in the `releases/` folder:
+Published binaries belong in [GitHub Releases](https://github.com/minhtrancmvn/chrome-workspace-manager/releases), with versioned Chromium/unsigned Firefox ZIPs and SHA-256 checksums. Generated assets are ignored under `dist/`; [releases/](releases/) retains historical notes and installation media, not tracked ZIPs.
 
-- **releases/CHANGELOG.md** - Detailed changelog of all versions
-- **releases/workspace-manager-vX.X.X.zip** - Packaged extension files
-
-To create a new release, run:
+For local release-asset validation without publishing:
 
 ```bash
-./package-extension.sh
+node scripts/build-release.cjs --tag "v$(node -p "require('./manifest.json').version")"
 ```
 
-See [releases/README.md](releases/README.md) for more details.
+Follow [RELEASE_WORKFLOW.md](RELEASE_WORKFLOW.md) for tests, immutable version tags, successful Actions artifacts, and explicit draft/publication steps. See [browser support](BROWSER_SUPPORT.md) before claiming compatibility.
 
 ## Development
 

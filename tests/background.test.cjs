@@ -1427,3 +1427,96 @@ test('restarted worker excludes surviving inactive source windows after partial 
   assert.deepEqual(urls(restarted.stored().workspaces.b), ['https://b.test/']);
   assert.deepEqual(urls(restarted.stored().workspaces.a), ['https://live.test/', 'https://second.test/']);
 });
+
+test('Dia start-page-only window saves a legal new-tab fallback', async () => {
+  const window = live(1, ['chrome://start-page/3f6e674f-8df4-4e4f-a938-9b4aef']);
+  const env = harness({ windows: [window] });
+  const result = await env.complete(env.message('exportBackup'));
+  assert.equal(result.success, true);
+  assert.deepEqual(urls(result.data.workspaces.a), ['chrome://newtab']);
+});
+
+test('Dia start-page tabs are omitted beside real tabs', async () => {
+  const env = harness({ windows: [live(1, ['chrome://start-page/3f6e674f-8df4-4e4f-a938-9b4aef', 'https://real.test/'])] });
+  const result = await env.complete(env.message('exportBackup'));
+  assert.equal(result.success, true);
+  assert.deepEqual(urls(result.data.workspaces.a), ['https://real.test/']);
+});
+
+test('pinned Dia start-page tab is excluded from shared pins', async () => {
+  const window = pinWindow(1, ['chrome://start-page/3f6e674f-8df4-4e4f-a938-9b4aef', 'https://pin.test/']);
+  const env = harness({ data: { workspaces: { a: saved('a') }, activeWorkspaceId: 'a', settings: { sharePinnedTabs: true } }, windows: [window] });
+  const result = await env.complete(env.message('exportBackup'));
+  assert.equal(result.success, true);
+  assert.deepEqual(result.data.sharedPinnedTabs.map(tab => tab.url), ['https://pin.test/']);
+});
+
+for (const action of ['exportBackup', 'include-current adoption', 'fresh creation']) {
+  test(`${action} omits invalid zero-size normal geometry`, async () => {
+    const window = live(1);
+    window.width = 0;
+    window.height = 0;
+    const env = harness({ windows: [window] });
+    let workspace;
+    if (action === 'exportBackup') {
+      workspace = (await env.complete(env.message('exportBackup'))).data.workspaces.a;
+    } else {
+      const result = await env.complete(env.message('createWorkspace', {
+        name: 'Created', includeCurrentTabs: action === 'include-current adoption'
+      }));
+      assert.equal(result.success, true);
+      workspace = env.stored().workspaces[result.workspaceId];
+    }
+    assert.deepEqual(workspace.windows[0].windowState, { state: 'normal' });
+    assert.deepEqual(urls(workspace), action === 'fresh creation' ? ['chrome://newtab'] : ['https://live.test/']);
+  });
+}
+
+test('zero-size geometry snapshot survives backup export/import with valid tabs', async () => {
+  const window = live(1, ['https://first.test/', 'https://second.test/']);
+  window.width = 0;
+  window.height = 0;
+  const env = harness({ windows: [window] });
+  const backup = await env.complete(env.message('exportBackup'));
+  assert.deepEqual(backup.data.workspaces.a.windows[0].windowState, { state: 'normal' });
+  assert.deepEqual(urls(backup.data.workspaces.a), ['https://first.test/', 'https://second.test/']);
+  const imported = await env.complete(env.message('importBackup', { data: backup.data }));
+  assert.equal(imported.success, true);
+  assert.deepEqual(urls(env.stored().workspaces.a), ['https://first.test/', 'https://second.test/']);
+  assert.deepEqual([...env.open.values()].flatMap(item => item.tabs.map(tab => tab.url)), ['https://first.test/', 'https://second.test/']);
+});
+
+for (const [description, bounds] of [
+  ['negative position', { left: -120, top: -40, width: 900, height: 700 }],
+  ['zero position', { left: 0, top: 0, width: 900, height: 700 }]
+]) {
+  test(`valid normal geometry keeps ${description}`, async () => {
+    const window = live();
+    Object.assign(window, bounds);
+    const env = harness({ windows: [window] });
+    const result = await env.complete(env.message('exportBackup'));
+    assert.deepEqual(result.data.workspaces.a.windows[0].windowState, { state: 'normal', ...bounds });
+  });
+}
+
+test('non-normal snapshot retains state without geometry', async () => {
+  const window = live();
+  Object.assign(window, { state: 'maximized', left: 0, top: 0, width: 0, height: 0 });
+  const env = harness({ windows: [window] });
+  const result = await env.complete(env.message('exportBackup'));
+  assert.deepEqual(result.data.workspaces.a.windows[0].windowState, { state: 'maximized' });
+});
+
+test('backup import rejects Dia start-page URLs and zero normal dimensions before side effects', async () => {
+  const badStartPage = { workspaces: { a: saved('a', 'chrome://start-page/3f6e674f-8df4-4e4f-a938-9b4aef') }, activeWorkspaceId: 'a' };
+  const badDimensions = { workspaces: { a: saved('a', undefined, { windows: [{
+    windowState: { state: 'normal', left: 0, top: 0, width: 0, height: 0 }, tabs: [{ url: 'https://valid.test/', pinned: false }]
+  }] }) }, activeWorkspaceId: 'a' };
+  for (const data of [badStartPage, badDimensions]) {
+    const env = harness();
+    const callsBefore = env.calls.length;
+    const result = await env.complete(env.message('importBackup', { data }));
+    assert.match(result.error || '', /Invalid backup data/);
+    assert.equal(env.calls.slice(callsBefore).filter(call => call.name.startsWith('windows.') || call.name.startsWith('tabs.')).length, 0);
+  }
+});

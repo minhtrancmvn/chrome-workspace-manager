@@ -1,0 +1,76 @@
+name: Release assets
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Validate and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const tag = process.env.RELEASE_TAG;
+          const version = JSON.parse(fs.readFileSync('manifest.json', 'utf8')).version;
+          if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag) || tag !== `v${version}`) {
+            throw new Error('Release tag must be vMAJOR.MINOR.PATCH and match manifest.version exactly');
+          }
+          NODE
+      - name: Check syntax
+        run: |
+          bash -n package-extension.sh
+          for file in background.js browser-api.js popup.js scripts/*.cjs tests/*.cjs; do
+            node --check "$file"
+          done
+      - name: Run regression tests
+        run: |
+          mkdir -p test-results
+          node --test --test-reporter=tap tests/*.test.cjs > test-results/tests.tap 2>&1
+      - name: Build verified release assets
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/build-release.cjs --tag "$RELEASE_TAG"
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+      - name: Preserve release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: workspace-manager-${{ github.ref_name }}
+          path: |
+            dist/workspace-manager-${{ github.ref_name }}-chromium.zip
+            dist/workspace-manager-${{ github.ref_name }}-firefox-unsigned.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+      - name: Show test results
+        if: always()
+        run: cat test-results/tests.tap
+      - name: Preserve test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-test-results-${{ github.run_id }}
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 14

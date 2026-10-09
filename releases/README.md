@@ -1,58 +1,25 @@
 # Workspace Manager Releases
 
-This folder contains all packaged releases of the Workspace Manager Chrome extension.
+Download published extension assets from [GitHub Releases](https://github.com/minhtrancmvn/chrome-workspace-manager/releases). This folder retains historical notes and installation media, not tracked build archives. Source version is not a claim that a corresponding GitHub release has been published.
 
-## Files
+## Retained files
 
-- **CHANGELOG.md** - Detailed changelog of all releases with features, fixes, and improvements
-- **workspace-manager-vX.X.X.zip** - Packaged extension files ready for installation
+- [CHANGELOG.md](CHANGELOG.md): historical development/release notes.
+- `install-guide.gif`: Chromium unpacked-installation guide.
+- This README: release-folder policy.
 
-## Installing a Release
+Historical ZIPs for versions 2.3.0–2.3.7 were removed from the current tree; they remain recoverable from Git history. No history rewriting or automatic GitHub migration was performed. Future packages are generated into ignored `dist/` and attached to reviewed GitHub Releases.
+
+## Installing a published asset
 
 ![Installation Guide](install-guide.gif)
 
-1. Download the desired `.zip` file
-2. Extract the contents to a folder
-3. Open Chrome/Dia and go to `chrome://extensions/`
-4. Enable "Developer mode" (toggle in top right)
-5. Click "Load unpacked"
-6. Select the extracted folder
-7. The extension is now installed!
+1. Download the versioned Chromium ZIP and `SHA256SUMS` from the same GitHub release. Verify the downloaded archive's SHA-256 against its entry; verify the full checksum file when both assets are downloaded.
+2. Extract into a fresh directory.
+3. Open Chrome's extension management page, enable Developer mode, choose **Load unpacked**, and select that directory.
 
-## Latest Release
+Firefox uses the separate `firefox-unsigned.zip` asset for temporary testing. It is not signed for permanent installation; see [browser support](../BROWSER_SUPPORT.md). Chromium-compatible packaging does not establish complete Dia support.
 
-**Version 2.1.0** - Adds ability to rename workspaces with inline editing
+## Creating a release
 
-See [CHANGELOG.md](CHANGELOG.md) for full release history.
-
-## Creating a New Release
-
-Run the packaging script from the root directory:
-
-```bash
-./package-extension.sh
-```
-
-This will:
-1. Read the version from `manifest.json`
-2. Create a new zip file in the `releases/` folder
-3. Prompt you to add a changelog entry (optional)
-4. Automatically update `CHANGELOG.md` with your entry
-
-## Changelog Format
-
-When prompted, describe the changes in this format:
-
-```
-### New Features
-- Feature 1 description
-- Feature 2 description
-
-### Bug Fixes
-- Fix 1 description
-
-### Improvements
-- Improvement 1 description
-```
-
-The script will automatically add the version number and date.
+Follow [RELEASE_WORKFLOW.md](../RELEASE_WORKFLOW.md): validate source, build version-matched assets, tag the reviewed commit, retrieve the successful GitHub Actions artifacts, and explicitly create a draft release. Publication and browser-store uploads remain separate actions. Never commit generated ZIPs.

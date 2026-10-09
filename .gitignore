@@ -34,7 +34,7 @@ node_modules/
 
 # Build artifacts
 *.zip
-!releases/*.zip
+/dist/
 
 # Development files
 *.log

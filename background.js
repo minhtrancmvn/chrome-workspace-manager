@@ -201,6 +201,7 @@ function isBlankTab(url) {
   const blankTabPatterns = [
     'chrome://newtab',
     'chrome://new-tab-page',
+    'chrome://start-page/',
     'edge://newtab',
     'about:newtab',
     'about:blank',
@@ -428,6 +429,16 @@ async function replaceWorkspaceWindows(workspaceId, sourceWindows, previousState
   }
 }
 
+function snapshotWindowState(window) {
+  const state = { state: window.state || 'maximized' };
+  const { left, top, width, height } = window;
+  // Dia can report zero-size windows; omit unusable bounds from saved snapshots.
+  if (state.state === 'normal' && [left, top, width, height].every(Number.isFinite) && width > 0 && height > 0) {
+    Object.assign(state, { left, top, width, height });
+  }
+  return state;
+}
+
 // Create a new workspace
 async function createWorkspace(name, includeCurrentTabs = false, color = '#667eea') {
   return withTransition(async () => {
@@ -437,18 +448,13 @@ async function createWorkspace(name, includeCurrentTabs = false, color = '#667ee
     let workspaceId = Date.now().toString();
     while (workspaces[workspaceId]) workspaceId = (Number(workspaceId) + 1).toString();
     const firstWindow = allWindows[0];
-    const template = firstWindow?.state === 'normal' ? {
-      state: 'normal', left: firstWindow.left, top: firstWindow.top,
-      width: firstWindow.width, height: firstWindow.height
-    } : { state: firstWindow?.state || 'maximized' };
+    const template = firstWindow ? snapshotWindowState(firstWindow) : { state: 'maximized' };
     const windowsData = includeCurrentTabs ? allWindows.map(window => {
       const tabs = window.tabs.filter(tab => typeof tab.url === 'string' && tab.url.length > 0 && !isBlankTab(tab.url) && (!settings.sharePinnedTabs || !tab.pinned))
         .map(tab => ({ url: tab.url, title: tab.title, pinned: tab.pinned || false }));
       return {
         windowId: window.id,
-        windowState: window.state === 'normal' ? {
-          state: 'normal', left: window.left, top: window.top, width: window.width, height: window.height
-        } : { state: window.state },
+        windowState: snapshotWindowState(window),
         tabs: tabs.length ? tabs : [{ url: 'chrome://newtab', title: 'New Tab', pinned: false }]
       };
     }) : [{ windowState: template, tabs: [{ url: 'chrome://newtab', title: 'New Tab', pinned: false }] }];
@@ -856,18 +862,7 @@ async function saveAllWorkspaceWindows() {
   // Save data for all current windows
   const windowsData = [];
   for (const window of allWindows) {
-    let windowState = { state: 'maximized' };
-    if (window.state === 'normal') {
-      windowState = {
-        left: window.left,
-        top: window.top,
-        width: window.width,
-        height: window.height,
-        state: 'normal'
-      };
-    } else {
-      windowState = { state: window.state };
-    }
+    const windowState = snapshotWindowState(window);
     
     // Get tabs from this window
     let windowTabs;
